@@ -33,6 +33,8 @@ class Business(Entity):
     increment_min: int = 10
     notice_min: int = 120
     horizon_days: int = 30
+    booking_until: date | None = None
+    horizon_before_calendar: int | None = None
     cancel_notice_min: int = 720
     move_notice_min: int = 360
     payment_details: str = ""
