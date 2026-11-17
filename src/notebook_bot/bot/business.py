@@ -170,6 +170,7 @@ async def settings(callback, app, actor):
         "Настройки\n\n" + "\n".join(f"{label}: {getattr(b, key) or '—'}" for key, label in FIELDS.items()),
         one(
             *[(label, f"setting:{id}:{key}") for key, label in FIELDS.items()],
+            ("Выбрать последнюю дату на календаре", f"horizon:{id}"),
             ("Расширенные настройки", f"advanced:{id}"),
             HOME,
         ),

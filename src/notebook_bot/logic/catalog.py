@@ -1,9 +1,21 @@
 """Сервисные операции главного меню, бизнеса, профиля и избранного."""
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
-from ..models import Business, Favorite, Service, User
+from ..models import (
+    Appointment,
+    Business,
+    Client,
+    DateOverride,
+    DayRule,
+    Favorite,
+    Service,
+    TimeNote,
+    User,
+)
 from ..repository import Repository
+from .availability import available_times, effective_day, occupies
 from .rules import RuleError, number, text
 
 
@@ -28,6 +40,7 @@ class Catalog:
     def __init__(self, repo: Repository, timezone):
         self.repo = repo
         self.timezone = timezone
+        self.clock = lambda: datetime.now(timezone)
 
     async def user(self, telegram_id, name):
         async with self.repo.transaction() as transaction:
@@ -150,3 +163,186 @@ class Catalog:
                 await transaction.delete(Favorite, values[0].id)
             else:
                 await transaction.put(Favorite(user_id=actor, business_id=business_id))
+
+
+    async def service(self, id):
+        async with self.repo.transaction() as tx:
+            s = await tx.get(Service, id)
+            if not s:
+                raise RuleError("Услуга не найдена.")
+            return s
+
+    async def save_service(self, actor, business_id, name, price, mode, duration, prepay=0, id=None):
+        async with self.repo.transaction() as tx:
+            b = await self.owner(tx, actor, business_id)
+            if mode not in ("fixed", "personal"):
+                raise RuleError("Выберите режим длительности.")
+            s = await tx.get(Service, id) if id else Service(business_id=business_id, name=name)
+            if not s or s.business_id != business_id:
+                raise RuleError("Услуга недоступна.")
+            s.name, s.price_rub = text(name, 100), number(price)
+            s.mode, s.duration_min = mode, number(duration, 1, 1440)
+            s.prepay_rub = number(prepay, 0, s.price_rub)
+            if s.prepay_rub and not b.payment_details:
+                raise RuleError("Сначала укажите реквизиты в настройках бизнеса.")
+            await tx.put(s)
+            return s
+
+    async def toggle_service(self, actor, id):
+        async with self.repo.transaction() as tx:
+            s = await tx.get(Service, id)
+            if not s:
+                raise RuleError("Услуга не найдена.")
+            await self.owner(tx, actor, s.business_id)
+            s.active = not s.active
+            await tx.put(s)
+
+    async def schedule(self, actor, business_id, day=None):
+        async with self.repo.transaction() as tx:
+            b = await self.owner(tx, actor, business_id)
+            if day:
+                return await effective_day(tx, b, day)
+            return await tx.list(DayRule, business_id=business_id)
+
+    async def edit_schedule(self, actor, business_id, key, field, value):
+        async with self.repo.transaction() as tx:
+            b = await self.owner(tx, actor, business_id)
+            is_week = isinstance(key, int)
+            if is_week:
+                found = await tx.list(DayRule, business_id=business_id, weekday=key)
+                rule = found[0] if found else DayRule(business_id=business_id, weekday=key)
+            else:
+                found = await tx.list(DateOverride, business_id=business_id, day=key)
+                rule = found[0] if found else DateOverride(business_id=business_id, day=key)
+            if field == "limit":
+                rule.limit = None if value == "-" else number(value, 0, 1000)
+                if not is_week:
+                    rule.limit_override = True
+            elif field == "intervals":
+                rule.intervals = value
+                if not is_week:
+                    rule.day_off = False
+            elif field == "comment":
+                rule.comment = "" if value == "-" else text(value, 1000)
+            elif field == "closed" and not is_week:
+                rule.closed.extend(value)
+            elif field == "clear_closed" and not is_week:
+                rule.closed = []
+            elif field == "day_off" and not is_week:
+                rule.day_off = True
+            elif field == "address" and not is_week:
+                rule.address = "" if value == "-" else text(value, 500)
+            elif field == "reset" and not is_week:
+                await tx.delete(DateOverride, rule.id)
+                return []
+            else:
+                raise RuleError("Изменение недоступно.")
+            await tx.put(rule)
+            # Существующие записи не отменяем, а сообщаем о конфликтах.
+            conflicts = []
+            for a in await tx.list(Appointment, business_id=business_id):
+                if not occupies(a, self.clock()) or a.start < self.clock():
+                    continue
+                if (a.start.weekday() != key) if is_week else (a.start.date() != key):
+                    continue
+                work, closed, limit, _, _ = await effective_day(tx, b, a.start.date())
+                minute = a.start.hour * 60 + a.start.minute
+                count = sum(
+                    1
+                    for x in await tx.list(Appointment, business_id=business_id)
+                    if x.start.date() == a.start.date() and occupies(x, self.clock())
+                )
+                if (
+                    not any(w.start <= minute and minute + a.duration_min <= w.end for w in work)
+                    or any(minute < c.end and minute + a.duration_min > c.start for c in closed)
+                    or (limit is not None and count > limit)
+                ):
+                    conflicts.append(a)
+            return conflicts
+
+    async def set_time_note(self, actor, business_id, day, minute, comment, address):
+        async with self.repo.transaction() as tx:
+            await self.owner(tx, actor, business_id)
+            items = await tx.list(TimeNote, business_id=business_id, day=day, minute=minute)
+            note = items[0] if items else TimeNote(business_id=business_id, day=day, minute=minute)
+            note.comment, note.address = comment[:1000], address[:500]
+            await tx.put(note)
+
+    async def dates(self, actor, service_id, start_day=None, appointment_id=None):
+        async with self.repo.transaction() as tx:
+            s = await tx.get(Service, service_id)
+            if not s:
+                raise RuleError("Услуга не найдена.")
+            b = await tx.get(Business, s.business_id)
+            clients = await tx.list(Client, business_id=b.id, user_id=actor)
+            client_id = clients[0].id if clients else None
+            duration = None
+            if appointment_id:
+                a = await tx.get(Appointment, appointment_id)
+                c = await tx.get(Client, a.client_id) if a else None
+                if not a or not c or a.service_id != s.id or actor not in (b.owner_id, c.user_id):
+                    raise RuleError("Запись недоступна.")
+                client_id, duration = a.client_id, a.required_duration or a.duration_min
+            first = max(start_day or self.clock().date(), self.clock().date())
+            last = self.clock().date() + timedelta(days=b.horizon_days)
+            if b.booking_until is not None:
+                last = min(last, b.booking_until)
+            result = []
+            for offset in range((last - first).days + 1):
+                day = first + timedelta(days=offset)
+                if await available_times(
+                    tx,
+                    b,
+                    s,
+                    client_id,
+                    day,
+                    self.clock(),
+                    exclude=appointment_id,
+                    duration=duration,
+                    existing=bool(appointment_id),
+                ):
+                    result.append(day)
+            return result
+
+    async def times(self, actor, service_id, day, appointment_id=None):
+        async with self.repo.transaction() as tx:
+            s = await tx.get(Service, service_id)
+            if not s:
+                raise RuleError("Услуга не найдена.")
+            b = await tx.get(Business, s.business_id)
+            clients = await tx.list(Client, business_id=b.id, user_id=actor)
+            client_id, duration = (clients[0].id if clients else None), None
+            if appointment_id:
+                a = await tx.get(Appointment, appointment_id)
+                c = await tx.get(Client, a.client_id) if a else None
+                if not a or not c or a.service_id != s.id or actor not in (b.owner_id, c.user_id):
+                    raise RuleError("Запись недоступна.")
+                client_id, duration = a.client_id, a.required_duration or a.duration_min
+            return await available_times(
+                tx,
+                b,
+                s,
+                client_id,
+                day,
+                self.clock(),
+                exclude=appointment_id,
+                duration=duration,
+                existing=bool(appointment_id),
+            )
+
+    async def set_booking_until(self, actor, business_id, last_day):
+        today = self.clock().date()
+        async with self.repo.transaction() as tx:
+            business = await self.owner(tx, actor, business_id)
+            if last_day is not None and not today <= last_day <= today + timedelta(days=180):
+                raise RuleError("Выберите дату от сегодня до 180 дней вперёд.")
+            if last_day is not None:
+                if business.booking_until is None:
+                    business.horizon_before_calendar = business.horizon_days
+                business.horizon_days = max(1, (last_day - today).days)
+            else:
+                business.horizon_days = business.horizon_before_calendar or 30
+                business.horizon_before_calendar = None
+            business.booking_until = last_day
+            await tx.put(business)
+            return business

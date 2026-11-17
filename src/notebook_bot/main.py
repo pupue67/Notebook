@@ -11,7 +11,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 
-from .bot import business, menu
+from .bot import business, calendar, menu, schedule, services
 from .bot.common import ContextMiddleware, HOME, forms_router, one, send
 from .config import Settings
 from .logic.catalog import Catalog
@@ -75,6 +75,9 @@ def build_dispatcher(app: Catalog) -> Dispatcher:
     # Deep link обрабатывается раньше обычной команды /start.
     dispatcher.include_router(business.router)
     dispatcher.include_router(menu.router)
+    dispatcher.include_router(services.router)
+    dispatcher.include_router(schedule.router)
+    dispatcher.include_router(calendar.router)
     dispatcher.include_router(forms_router)
 
     fallback = Router(name="future_sections")
