@@ -1,0 +1,91 @@
+"""Сквозной сценарий задач 3–6 с настоящим JSON-хранилищем."""
+
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from notebook_bot.config import Settings
+from notebook_bot.bot.notifications import deliver
+from notebook_bot.logic.rules import RuleError
+from notebook_bot.main import build_app, build_dispatcher, process_lock
+from notebook_bot.models import Appointment, History, Interval, Notification
+
+
+@pytest.mark.asyncio
+async def test_client_booking_survives_restart_and_releases_slot(tmp_path):
+    timezone = ZoneInfo("Asia/Yekaterinburg")
+    now = datetime(2026, 11, 20, 9, 0, tzinfo=timezone)
+    settings = Settings("test:token", "json", tmp_path / "notebook.json", timezone)
+    app = build_app(settings)
+    app.clock = lambda: now
+    dispatcher = build_dispatcher(app)
+    assert "booking" in [router.name for router in dispatcher.sub_routers]
+    assert "appointments" in [router.name for router in dispatcher.sub_routers]
+
+    owner = await app.user(101, "Мастер")
+    client = await app.user(102, "Клиент")
+    second = await app.user(103, "Другой клиент")
+    business = await app.create_business(owner.id, "Студия", "Мастер", "Услуги", "at_master", "Адрес", "")
+    service = await app.save_service(owner.id, business.id, "Стрижка", 1000, "fixed", 60)
+    day = now.date() + timedelta(days=3)
+    await app.edit_schedule(owner.id, business.id, day.weekday(), "intervals", [Interval(start=600, end=780)])
+    start = next(slot for slot in await app.times(client.id, service.id, day) if slot.hour == 10)
+
+    appointment = await app.create(client.id, service.id, start)
+    assert (await app.create(client.id, service.id, start)).id == appointment.id
+    with pytest.raises(RuleError, match="недоступно"):
+        await app.create(second.id, service.id, start)
+
+    reopened = build_app(settings)
+    reopened.clock = lambda: now
+    assert len(await reopened.appointments(client.id)) == 1
+    assert (await reopened.get_appointment(client.id, appointment.id))[0].status == "booked"
+    assert len(await reopened.clients(owner.id, business.id)) == 1
+    assert settings.data_file.exists()
+
+    moved_start = next(slot for slot in await reopened.times(client.id, service.id, day, appointment.id) if slot.hour == 11)
+    moved = await reopened.move(client.id, appointment.id, moved_start, appointment.revision)
+    with pytest.raises(RuleError, match="устарела"):
+        await reopened.move(client.id, appointment.id, start, appointment.revision)
+    cancelled = await reopened.cancel(client.id, moved.id, moved.revision)
+    assert cancelled.status == "cancelled_client"
+    assert start in await reopened.times(second.id, service.id, day)
+
+    again = build_app(settings)
+    again.clock = lambda: now
+    async with again.repo.transaction() as tx:
+        assert len(await tx.list(Appointment, business_id=business.id)) == 1
+        assert [row.action for row in await tx.list(History, appointment_id=appointment.id)] == [
+            "create", "move", "cancel"
+        ]
+        assert len(await tx.list(Notification, appointment_id=appointment.id)) == 6
+
+    class FakeBot:
+        def __init__(self):
+            self.messages = []
+
+        async def send_message(self, chat_id, message, **kwargs):
+            self.messages.append((chat_id, message))
+
+    bot = FakeBot()
+    await deliver(bot, again)
+    assert len(bot.messages) == 6
+    await deliver(bot, build_app(settings))
+    assert len(bot.messages) == 6
+
+
+@pytest.mark.asyncio
+async def test_memory_mode_does_not_write_json(tmp_path):
+    settings = Settings("test:token", "memory", tmp_path / "notebook.json", ZoneInfo("Asia/Yekaterinburg"))
+    app = build_app(settings)
+    await app.user(101, "Мастер")
+    assert not settings.data_file.exists()
+
+
+def test_second_process_cannot_lock_same_file(tmp_path):
+    path = tmp_path / "notebook.json.lock"
+    with process_lock(path):
+        with pytest.raises(RuntimeError, match="уже запущен"):
+            with process_lock(path):
+                pass

@@ -10,6 +10,7 @@ from ..models import (
     DateOverride,
     DayRule,
     Favorite,
+    Notification,
     Service,
     TimeNote,
     User,
@@ -267,6 +268,30 @@ class Catalog:
             note = items[0] if items else TimeNote(business_id=business_id, day=day, minute=minute)
             note.comment, note.address = comment[:1000], address[:500]
             await tx.put(note)
+
+    async def client(self, tx, business_id, user_id=None, name=None):
+        if user_id:
+            clients = await tx.list(Client, business_id=business_id, user_id=user_id)
+            if clients:
+                return clients[0]
+            user = await tx.get(User, user_id)
+            if not user:
+                raise RuleError("Клиент не найден.")
+            name = user.name
+        client = Client(business_id=business_id, user_id=user_id, name=text(name, 100))
+        await tx.put(client)
+        return client
+
+    async def clients(self, actor, business_id):
+        async with self.repo.transaction() as tx:
+            await self.owner(tx, actor, business_id)
+            return await tx.list(Client, business_id=business_id)
+
+    async def notify(self, tx, appointment, message):
+        business = await tx.get(Business, appointment.business_id)
+        client = await tx.get(Client, appointment.client_id)
+        for user_id in {business.owner_id, client.user_id} - {None}:
+            await tx.put(Notification(user_id=user_id, text=message, appointment_id=appointment.id))
 
     async def dates(self, actor, service_id, start_day=None, appointment_id=None):
         async with self.repo.transaction() as tx:
