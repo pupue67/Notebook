@@ -5,7 +5,7 @@ from secrets import token_hex
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 
-from ..logic.rules import RuleError, hhmm
+from ..logic.rules import RuleError, hhmm, intervals
 from ..models import Interval
 from .common import HOME, form, kb, one, send, start_form
 
@@ -81,6 +81,7 @@ async def render_day(event, app, actor, id, key):
             description,
             one(
                 *[(label, f"sched:{id}:{key}:{field}") for label, field in buttons],
+                ("Выбрать время кнопками", f"intervalbuttons:{id}:{key}:intervals"),
                 ("Рабочая неделя", f"week:{id}"),
                 HOME,
             ),
@@ -106,6 +107,8 @@ async def render_day(event, app, actor, id, key):
             description,
             one(
                 *[(label, f"sched:{id}:{key}:{field}") for label, field in buttons],
+                ("Выбрать рабочее время кнопками", f"intervalbuttons:{id}:{key}:intervals"),
+                ("Закрыть время кнопками", f"intervalbuttons:{id}:{key}:closed"),
                 ("Комментарий / адрес конкретного времени", f"timenote:{id}:{key}"),
                 ("Записать клиента вручную", f"manual:{id}:{key}"),
                 ("Открыть записи этой даты", f"dayapps:{id}:{key}"),
@@ -131,9 +134,55 @@ async def edit(callback, state: FSMContext, app, actor):
         await show_conflicts(callback, conflicts, id, key)
         return
     if field in ("intervals", "closed"):
-        await start_interval_picker(callback, state, app, actor, id, key, field)
+        await start_interval_form(callback, state, id, key, field)
         return
     await manual_schedule_form(callback, state, id, key, field)
+
+
+async def start_interval_form(event, state, id, key, field, append=False):
+    await start_form(
+        event, state, "interval_pair",
+        [
+            ("start", "Начало интервала (ЧЧ:ММ), например 10:00:", "time"),
+            ("end", "Конец интервала (ЧЧ:ММ), например 13:00:", "end_time"),
+        ],
+        {"id": id, "key": key, "field": field, "append": append},
+    )
+
+
+@router.callback_query(F.data.startswith("intervaladd:"))
+async def add_interval(callback, state: FSMContext):
+    _, id, key, field = callback.data.split(":")
+    await start_interval_form(callback, state, id, key, field, append=True)
+
+
+@router.callback_query(F.data.startswith("intervalbuttons:"))
+async def interval_buttons(callback, state: FSMContext, app, actor):
+    _, id, key, field = callback.data.split(":")
+    await start_interval_picker(callback, state, app, actor, id, key, field)
+
+
+@form("interval_pair")
+async def save_interval_pair(message, app, actor, values, context):
+    start, end = values["start"], values["end"]
+    if start >= end:
+        raise RuleError("Конец интервала должен быть позже начала.")
+    key, field, id = context["key"], context["field"], context["id"]
+    schedule_key = int(key[1:]) if key.startswith("w") else date.fromisoformat(key)
+    if key.startswith("w"):
+        rules = await app.schedule(actor, id)
+        rule = next((item for item in rules if item.weekday == schedule_key), None)
+        existing = rule.intervals if rule else []
+    else:
+        work, closed, *_ = await app.schedule(actor, id, schedule_key)
+        existing = work if field == "intervals" else closed
+    selected = Interval(start=start, end=end)
+    combined = [*existing, selected] if context["append"] else [selected]
+    # Reuse the same overlap validation as the text form.
+    validated = intervals(", ".join(f"{hhmm(item.start)}-{hhmm(item.end)}" for item in combined))
+    value = [selected] if field == "closed" else validated
+    conflicts = await app.edit_schedule(actor, id, schedule_key, field, value)
+    await show_conflicts(message, conflicts, id, key, add_field=field)
 
 
 async def manual_schedule_form(event, state, id, key, field):
@@ -192,7 +241,7 @@ async def render_interval_picker(event, state):
         rows = [buttons[index:index + columns] for index in range(0, len(buttons), columns)]
     if picker["field"] == "intervals":
         rows.append([("Сделать выходным", f"ipick:{nonce}:off")])
-    rows.append([("Ввести интервал текстом", f"ipick:{nonce}:manual")])
+    rows.append([("Ввести время текстом", f"ipick:{nonce}:manual")])
     rows.append([("Отмена", f"dayrule:{picker['id']}:{picker['key']}")])
     await send(event, message, kb(*rows))
 
@@ -206,7 +255,7 @@ async def interval_pick(callback, state: FSMContext, app, actor):
     await app.owned_business(actor, picker["id"])
     action = parts[2]
     if action == "manual":
-        await manual_schedule_form(callback, state, picker["id"], picker["key"], picker["field"])
+        await start_interval_form(callback, state, picker["id"], picker["key"], picker["field"])
         return
     if action == "off" and picker["field"] == "intervals":
         picker["items"] = []
@@ -215,9 +264,13 @@ async def interval_pick(callback, state: FSMContext, app, actor):
         if not picker["items"] and picker["field"] == "closed":
             raise RuleError("Сначала выберите закрытый промежуток.")
         key = picker["key"]
+        selected = intervals(
+            ", ".join(f"{hhmm(item['start'])}-{hhmm(item['end'])}" for item in picker["items"])
+            if picker["items"] else "-"
+        )
         conflicts = await app.edit_schedule(
             actor, picker["id"], int(key[1:]) if key.startswith("w") else date.fromisoformat(key),
-            picker["field"], [Interval(**item) for item in picker["items"]],
+            picker["field"], selected,
         )
         await state.clear()
         await show_conflicts(callback, conflicts, picker["id"], key)
@@ -255,7 +308,7 @@ async def interval_pick(callback, state: FSMContext, app, actor):
     await render_interval_picker(callback, state)
 
 
-async def show_conflicts(event, conflicts, id, key):
+async def show_conflicts(event, conflicts, id, key, add_field=None):
     message = "Изменения сохранены для новых записей."
     if conflicts:
         message += f"\nЕсть конфликты с {len(conflicts)} существующими записями. Они сохранены. Откройте карточки и предложите перенос."
@@ -264,6 +317,7 @@ async def show_conflicts(event, conflicts, id, key):
         message,
         one(
             *[(f"Открыть / перенести {a.start:%d.%m %H:%M}", f"appt:{a.id}") for a in conflicts[:15]],
+            *([("Добавить ещё интервал", f"intervaladd:{id}:{key}:{add_field}")] if add_field else []),
             ("Вернуться к графику", f"dayrule:{id}:{key}"),
             HOME,
         ),

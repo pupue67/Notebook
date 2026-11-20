@@ -4,7 +4,13 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from notebook_bot.bot.calendar import month_rows, show_master_month
-from notebook_bot.bot.schedule import calendar as open_calendar, interval_pick, start_interval_picker
+from notebook_bot.bot.schedule import (
+    calendar as open_calendar,
+    interval_pick,
+    save_interval_pair,
+    start_interval_form,
+    start_interval_picker,
+)
 from notebook_bot.config import Settings
 from notebook_bot.main import build_app
 from notebook_bot.models import Interval
@@ -19,6 +25,12 @@ class State:
 
     async def update_data(self, **values):
         self.data.update(values)
+
+    async def set_data(self, values):
+        self.data = values
+
+    async def set_state(self, _value):
+        pass
 
     async def get_data(self):
         return self.data
@@ -57,6 +69,15 @@ async def test_coloured_calendar_and_interval_buttons(tmp_path):
     rules = await app.schedule(owner.id, business.id)
     assert rules[0].intervals == [Interval(start=600, end=660)]
 
+    await start_interval_form(event, state, business.id, f"w{day.weekday()}", "intervals", append=True)
+    form_data = await state.get_data()
+    assert [field[2] for field in form_data["fields"]] == ["time", "end_time"]
+    await save_interval_pair(
+        event, app, owner.id, {"start": 720, "end": 780}, form_data["context"]
+    )
+    rules = await app.schedule(owner.id, business.id)
+    assert rules[0].intervals == [Interval(start=600, end=660), Interval(start=720, end=780)]
+
     event.data = f"calendar:{business.id}"
     await open_calendar(event, app, owner.id)
     calendar_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
@@ -77,6 +98,9 @@ async def test_coloured_calendar_and_interval_buttons(tmp_path):
     assert button == (str(day.day), day.isoformat(), "primary")
 
     await app.create(client.id, service.id, datetime(2026, 11, 23, 10, tzinfo=timezone))
+    # The day remains free while the later interval still has room.
+    assert (await app.calendar_days(client.id, business.id, day.year, day.month, service.id))[day] == "free"
+    await app.create(client.id, service.id, datetime(2026, 11, 23, 12, tzinfo=timezone))
     statuses = await app.calendar_days(client.id, business.id, day.year, day.month, service.id)
     assert statuses[day] == "busy"
     rows = month_rows(day.year, day.month, statuses, lambda value: value.isoformat())
