@@ -14,7 +14,10 @@ SUBMITS = {}
 def kb(*rows):
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=label, callback_data=data) for label, data in row]
+            [
+                InlineKeyboardButton(text=button[0], callback_data=button[1], style=button[2] if len(button) > 2 else None)
+                for button in row
+            ]
             for row in rows
         ]
     )

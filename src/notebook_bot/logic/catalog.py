@@ -1,7 +1,8 @@
 """Сервисные операции главного меню, бизнеса, профиля и избранного."""
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from calendar import monthrange
+from datetime import date, datetime, timedelta
 
 from ..models import (
     Appointment,
@@ -327,6 +328,59 @@ class Catalog:
                     existing=bool(appointment_id),
                 ):
                     result.append(day)
+            return result
+
+    async def calendar_days(self, actor, business_id, year, month, service_id=None, appointment_id=None):
+        """Return free, busy, off or outside for each day of a displayed month."""
+        async with self.repo.transaction() as tx:
+            business = await tx.get(Business, business_id)
+            if not business:
+                raise RuleError("Бизнес не найден.")
+            if service_id:
+                service = await tx.get(Service, service_id)
+                if not service or service.business_id != business_id:
+                    raise RuleError("Услуга недоступна.")
+                services = [service]
+                clients = await tx.list(Client, business_id=business_id, user_id=actor)
+                client_id = clients[0].id if clients else None
+                duration = None
+                if appointment_id:
+                    appointment = await tx.get(Appointment, appointment_id)
+                    client = await tx.get(Client, appointment.client_id) if appointment else None
+                    if (
+                        not appointment or not client or appointment.service_id != service_id
+                        or actor not in (business.owner_id, client.user_id)
+                    ):
+                        raise RuleError("Запись недоступна.")
+                    client_id = appointment.client_id
+                    duration = appointment.required_duration or appointment.duration_min
+            else:
+                await self.owner(tx, actor, business_id)
+                services = [s for s in await tx.list(Service, business_id=business_id) if s.active]
+                client_id = duration = None
+            now = self.clock()
+            last = now.date() + timedelta(days=business.horizon_days)
+            if business.booking_until:
+                last = min(last, business.booking_until)
+            result = {}
+            for day_number in range(1, monthrange(year, month)[1] + 1):
+                day = date(year, month, day_number)
+                if day < now.date() or day > last:
+                    result[day] = "outside"
+                    continue
+                work, _, _, _, _ = await effective_day(tx, business, day)
+                if not work:
+                    result[day] = "off"
+                    continue
+                result[day] = "busy"
+                for item in services:
+                    if await available_times(
+                        tx, business, item, client_id, day, now,
+                        exclude=appointment_id, duration=duration,
+                        existing=bool(appointment_id),
+                    ):
+                        result[day] = "free"
+                        break
             return result
 
     async def times(self, actor, service_id, day, appointment_id=None):

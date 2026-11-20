@@ -6,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 
 from ..logic.availability import duration_for, visit_context
 from ..logic.rules import RuleError
+from .calendar import month_rows, shift_month
 from .common import HOME, kb, one, send
 
 router = Router(name="booking")
@@ -36,39 +37,62 @@ async def dates(event, state, app, actor, page=0):
     await state.update_data(
         choices=[x.isoformat() for x in choices], view="dates", nonce=token_hex(3), page=page
     )
-    await render_choices(event, state)
+    await render_choices(event, state, app, actor)
 
 
-async def render_choices(event, state):
+async def render_choices(event, state, app, actor):
     data = await state.get_data()
     choices, page, view, nonce = data["choices"], data["page"], data["view"], data["nonce"]
-    size = 12 if view == "dates" else 24
-    if page * size >= len(choices):
-        page = 0
-        await state.update_data(page=0)
-    rows = []
-    items = []
-    for index in range(page * size, min((page + 1) * size, len(choices))):
-        label = (
-            date.fromisoformat(choices[index]).strftime("%d.%m.%Y")
-            if view == "dates"
-            else datetime.fromisoformat(choices[index]).strftime("%H:%M")
+    if view == "dates":
+        today = app.clock().date()
+        year, month = shift_month(today.year, today.month, page)
+        service = await app.service(data["service_id"])
+        statuses = await app.calendar_days(
+            actor, service.business_id, year, month, service.id, data.get("appointment_id")
         )
-        items.append((label, f"pick:{nonce}:select:{index}"))
-    columns = 2 if view == "dates" else 3
-    rows.extend(items[i : i + columns] for i in range(0, len(items), columns))
-    nav = []
-    if page:
-        nav.append(("◀", f"pick:{nonce}:page:{page - 1}"))
-    if (page + 1) * size < len(choices):
-        nav.append(("▶", f"pick:{nonce}:page:{page + 1}"))
-    if nav:
-        rows.append(nav)
+        indices = {date.fromisoformat(value): index for index, value in enumerate(choices)}
+        statuses = {
+            day: (status if day in indices or status != "free" else "busy")
+            for day, status in statuses.items()
+        }
+        rows = month_rows(
+            year, month, statuses,
+            lambda day: (
+                f"pick:{nonce}:select:{indices[day]}"
+                if day in indices and statuses[day] == "free" else "hnoop"
+            ),
+        )
+        last = date.fromisoformat(choices[-1]) if choices else today
+        max_page = (last.year - today.year) * 12 + last.month - today.month
+        nav = []
+        if page:
+            nav.append(("◀", f"pick:{nonce}:page:{page - 1}"))
+        if page < max_page:
+            nav.append(("▶", f"pick:{nonce}:page:{page + 1}"))
+        if nav:
+            rows.append(nav)
+    else:
+        size = 24
+        if page * size >= len(choices):
+            page = 0
+            await state.update_data(page=0)
+        items = [
+            (datetime.fromisoformat(choices[index]).strftime("%H:%M"), f"pick:{nonce}:select:{index}")
+            for index in range(page * size, min((page + 1) * size, len(choices)))
+        ]
+        rows = [items[index:index + 3] for index in range(0, len(items), 3)]
+        nav = []
+        if page:
+            nav.append(("◀", f"pick:{nonce}:page:{page - 1}"))
+        if (page + 1) * size < len(choices):
+            nav.append(("▶", f"pick:{nonce}:page:{page + 1}"))
+        if nav:
+            rows.append(nav)
     if view == "times":
         rows.append([("Другая дата", f"pick:{nonce}:dates:0")])
     rows.append([HOME])
     message = (
-        "Выберите дату:"
+        f"{month:02d}.{year}: синий — есть время, красный — мест нет, обычный — выходной. Выберите дату:"
         if view == "dates"
         else f"{date.fromisoformat(data['day']):%d.%m.%Y} — выберите время:"
     )
@@ -90,7 +114,7 @@ async def pick(callback, state: FSMContext, app, actor):
         return
     if action == "page":
         await state.update_data(page=max(0, int(value)))
-        await render_choices(callback, state)
+        await render_choices(callback, state, app, actor)
         return
     if action == "confirm":
         if data.get("view") != "confirm":
@@ -112,7 +136,7 @@ async def pick(callback, state: FSMContext, app, actor):
         await state.update_data(
             day=chosen, choices=[x.isoformat() for x in choices], view="times", page=0, nonce=token_hex(3)
         )
-        await render_choices(callback, state)
+        await render_choices(callback, state, app, actor)
         return
     if data["view"] != "times":
         raise RuleError("Выбор устарел.")

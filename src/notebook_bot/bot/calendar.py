@@ -20,6 +20,57 @@ def shift_month(year, month, offset):
     return index // 12, index % 12 + 1
 
 
+def month_rows(year, month, statuses, callback_for_day):
+    """Build a compact Telegram calendar; colour comes from Bot API button styles."""
+    first = date(year, month, 1)
+    rows = [[(name, "hnoop") for name in ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")]]
+    cells = [(" ", "hnoop")] * first.weekday()
+    for number in range(1, monthrange(year, month)[1] + 1):
+        day = date(year, month, number)
+        status = statuses.get(day, "outside")
+        if status == "outside":
+            cells.append(("·", "hnoop"))
+        else:
+            style = "primary" if status == "free" else "danger" if status == "busy" else None
+            cells.append((str(number), callback_for_day(day), style))
+    cells.extend([(" ", "hnoop")] * (-len(cells) % 7))
+    rows.extend(cells[index:index + 7] for index in range(0, len(cells), 7))
+    return rows
+
+
+@router.callback_query(F.data.startswith("mastermonth:"))
+async def master_month(callback, app, actor):
+    parts = callback.data.split(":")
+    business_id = parts[1]
+    await app.owned_business(actor, business_id)
+    today = app.clock().date()
+    year, month = (int(parts[2]), int(parts[3])) if len(parts) == 4 else (today.year, today.month)
+    first = date(year, month, 1)
+    last = today + timedelta(days=180)
+    if first > last or (year, month) < (today.year, today.month):
+        raise RuleError("Этот месяц недоступен.")
+    statuses = await app.calendar_days(actor, business_id, year, month)
+    rows = month_rows(year, month, statuses, lambda day: f"dayrule:{business_id}:{day.isoformat()}")
+    nav = []
+    previous = shift_month(year, month, -1)
+    following = shift_month(year, month, 1)
+    if previous >= (today.year, today.month):
+        nav.append(("◀", f"mastermonth:{business_id}:{previous[0]}:{previous[1]}"))
+    if date(*following, 1) <= last:
+        nav.append(("▶", f"mastermonth:{business_id}:{following[0]}:{following[1]}"))
+    if nav:
+        rows.append(nav)
+    rows.append([("Рабочая неделя", f"week:{business_id}")])
+    rows.append([HOME])
+    await send(
+        callback,
+        f"{MONTHS[month - 1].capitalize()} {year}\n"
+        "Синий — есть свободное время, красный — рабочий день без свободного времени, "
+        "обычный — выходной, точка — вне срока записи. Нажмите дату для её настройки.",
+        kb(*rows),
+    )
+
+
 async def show_month(event, app, actor, business_id, year, month):
     async with app.repo.transaction() as tx:
         business = await app.owner(tx, actor, business_id)
