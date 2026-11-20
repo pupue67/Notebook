@@ -48,13 +48,18 @@ async def master_month(callback, app, actor):
 
 
 async def show_master_month(event, app, actor, business_id, year, month):
-    await app.owned_business(actor, business_id)
+    business = await app.owned_business(actor, business_id)
     today = app.clock().date()
     first = date(year, month, 1)
     last = today + timedelta(days=180)
     if first > last or (year, month) < (today.year, today.month):
         raise RuleError("Этот месяц недоступен.")
     statuses = await app.calendar_days(actor, business_id, year, month)
+    # The owner can prepare future dates before clients are allowed to book them.
+    statuses = {
+        day: "outside_editable" if status == "outside" and today <= day <= last else status
+        for day, status in statuses.items()
+    }
     rows = month_rows(year, month, statuses, lambda day: f"dayrule:{business_id}:{day.isoformat()}")
     nav = []
     previous = shift_month(year, month, -1)
@@ -65,14 +70,19 @@ async def show_master_month(event, app, actor, business_id, year, month):
         nav.append(("▶", f"mastermonth:{business_id}:{following[0]}:{following[1]}"))
     if nav:
         rows.append(nav)
+    rows.append([("Изменить срок записи", f"horizon:{business_id}")])
     rows.append([("Ввести дату текстом", f"calendartext:{business_id}")])
     rows.append([("Рабочая неделя", f"week:{business_id}")])
     rows.append([HOME])
+    booking_last = today + timedelta(days=business.horizon_days)
+    if business.booking_until:
+        booking_last = min(booking_last, business.booking_until)
     await send(
         event,
         f"{MONTHS[month - 1].capitalize()} {year}\n"
         "Синий — есть свободное время, красный — рабочий день без свободного времени, "
-        "обычный — выходной, точка — вне срока записи. Нажмите дату для её настройки.",
+        "обычный — выходной или день после срока записи, точка — прошедшая дата. "
+        f"Клиенты видят даты до {booking_last:%d.%m.%Y}. Нажмите дату для её настройки.",
         kb(*rows),
     )
 

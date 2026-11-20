@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from notebook_bot.bot.calendar import month_rows
+from notebook_bot.bot.calendar import month_rows, show_master_month
 from notebook_bot.bot.schedule import calendar as open_calendar, interval_pick, start_interval_picker
 from notebook_bot.config import Settings
 from notebook_bot.main import build_app
@@ -61,6 +61,13 @@ async def test_coloured_calendar_and_interval_buttons(tmp_path):
     await open_calendar(event, app, owner.id)
     calendar_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
     assert any(button.callback_data == f"dayrule:{business.id}:{day.isoformat()}" for button in calendar_buttons)
+
+    await show_master_month(event, app, owner.id, business.id, 2027, 1)
+    january_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
+    assert any(
+        button.text == "1" and button.callback_data == f"dayrule:{business.id}:2027-01-01"
+        for button in january_buttons
+    )
 
     statuses = await app.calendar_days(client.id, business.id, day.year, day.month, service.id)
     assert statuses[day] == "free"
