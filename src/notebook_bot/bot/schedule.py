@@ -38,7 +38,17 @@ async def week(callback, app, actor):
 
 
 @router.callback_query(F.data.startswith("calendar:"))
-async def calendar(callback, state: FSMContext):
+async def calendar(callback, app, actor):
+    from .calendar import show_master_month
+
+    today = app.clock().date()
+    await show_master_month(
+        callback, app, actor, callback.data.split(":")[1], today.year, today.month
+    )
+
+
+@router.callback_query(F.data.startswith("calendartext:"))
+async def calendar_text(callback, state: FSMContext):
     await start_form(
         callback,
         state,

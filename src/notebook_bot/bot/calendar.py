@@ -42,9 +42,14 @@ def month_rows(year, month, statuses, callback_for_day):
 async def master_month(callback, app, actor):
     parts = callback.data.split(":")
     business_id = parts[1]
-    await app.owned_business(actor, business_id)
     today = app.clock().date()
     year, month = (int(parts[2]), int(parts[3])) if len(parts) == 4 else (today.year, today.month)
+    await show_master_month(callback, app, actor, business_id, year, month)
+
+
+async def show_master_month(event, app, actor, business_id, year, month):
+    await app.owned_business(actor, business_id)
+    today = app.clock().date()
     first = date(year, month, 1)
     last = today + timedelta(days=180)
     if first > last or (year, month) < (today.year, today.month):
@@ -60,10 +65,11 @@ async def master_month(callback, app, actor):
         nav.append(("▶", f"mastermonth:{business_id}:{following[0]}:{following[1]}"))
     if nav:
         rows.append(nav)
+    rows.append([("Ввести дату текстом", f"calendartext:{business_id}")])
     rows.append([("Рабочая неделя", f"week:{business_id}")])
     rows.append([HOME])
     await send(
-        callback,
+        event,
         f"{MONTHS[month - 1].capitalize()} {year}\n"
         "Синий — есть свободное время, красный — рабочий день без свободного времени, "
         "обычный — выходной, точка — вне срока записи. Нажмите дату для её настройки.",
