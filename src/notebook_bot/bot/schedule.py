@@ -25,12 +25,12 @@ async def week(callback, app, actor):
         callback,
         "Рабочая неделя\nИзменения здесь относятся к выбранному дню недели.\n\n"
         + "\n".join(
-            f"{name}: {render_intervals(rules[i].intervals) if i in rules else 'Выходной'}"
+            f"{name}: {render_intervals(rules[i].intervals) if i in rules and rules[i].intervals else 'Выходной'}"
             for i, name in enumerate(DAYS)
         ),
         one(
             *[(name, f"dayrule:{id}:w{i}") for i, name in enumerate(DAYS)],
-            ("Задать одинаковый график нескольким дням", f"weekselect:{id}"),
+            ("Задать рабочие дни диапазоном", f"weekselect:{id}"),
             ("Календарь дат", f"mastermonth:{id}"),
             ("Последняя дата записи", f"horizon:{id}"),
             HOME,
@@ -43,20 +43,32 @@ async def select_weekdays(callback, state: FSMContext, app, actor):
     business_id = callback.data.split(":")[1]
     await app.owned_business(actor, business_id)
     await state.clear()
-    await state.update_data(week_selection={"business_id": business_id, "days": [], "nonce": token_hex(3)})
+    await state.update_data(week_selection={"business_id": business_id, "start": None, "end": None,
+                                            "days": [], "nonce": token_hex(3)})
     await render_week_selection(callback, state)
 
 
 async def render_week_selection(event, state):
     selection = (await state.get_data())["week_selection"]
     nonce = selection["nonce"]
-    buttons = [
-        (f"{'✓ ' if day in selection['days'] else ''}{name}", f"weekpick:{nonce}:toggle:{day}",
-         "primary" if day in selection["days"] else None)
-        for day, name in enumerate(DAYS)
-    ]
-    rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
-    if selection["days"]:
+    if selection["end"] is None:
+        buttons = [
+            (name, f"weekpick:{nonce}:pick:{day}", "primary" if day == selection["start"] else None)
+            for day, name in enumerate(DAYS)
+            if selection["start"] is None or day >= selection["start"]
+        ]
+        rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
+        prompt = ("Выберите первый рабочий день недели."
+                  if selection["start"] is None else
+                  f"Первый день — {DAYS[selection['start']]}. Выберите последний рабочий день.")
+    else:
+        off = [DAYS[day] for day in range(7) if day not in selection["days"]]
+        prompt = (f"Рабочие дни: {DAYS[selection['start']]} — {DAYS[selection['end']]}.\n"
+                  f"Выходные: {', '.join(off) if off else 'нет'}.\n"
+                  "Задайте общее рабочее время для выбранного диапазона.")
+        rows = [
+            [("Изменить диапазон", f"weekpick:{nonce}:reset")],
+        ]
         rows.extend([
             [("Рабочее время: ввести", f"weekpick:{nonce}:work_text", "success")],
             [("Рабочее время: кнопками", f"weekpick:{nonce}:work_buttons")],
@@ -67,7 +79,7 @@ async def render_week_selection(event, state):
     rows.append([HOME])
     await send(
         event,
-        "Отметьте рабочие дни недели. Синие дни выбраны. Затем задайте одно время начала и конца для всех.",
+        prompt,
         kb(*rows),
     )
 
@@ -79,19 +91,27 @@ async def choose_weekdays(callback, state: FSMContext, app, actor):
     if not selection or selection["nonce"] != parts[1]:
         raise RuleError("Выбор дней устарел. Откройте рабочую неделю заново.")
     await app.owned_business(actor, selection["business_id"])
-    if parts[2] == "toggle":
+    if parts[2] == "pick":
         day = int(parts[3])
         if not 0 <= day <= 6:
             raise RuleError("Неизвестный день недели.")
-        days = set(selection["days"])
-        days.symmetric_difference_update({day})
-        selection["days"] = sorted(days)
+        if selection["start"] is None:
+            selection["start"] = day
+        elif selection["end"] is None and day >= selection["start"]:
+            selection["end"] = day
+            selection["days"] = list(range(selection["start"], day + 1))
+        else:
+            raise RuleError("Последний рабочий день должен быть не раньше первого. Измените диапазон.")
         selection["nonce"] = token_hex(3)
+        await state.update_data(week_selection=selection)
+        await render_week_selection(callback, state)
+    elif parts[2] == "reset":
+        selection.update(start=None, end=None, days=[], nonce=token_hex(3))
         await state.update_data(week_selection=selection)
         await render_week_selection(callback, state)
     elif parts[2] in ("work_text", "work_buttons", "break_text", "break_buttons"):
         if not selection["days"]:
-            raise RuleError("Сначала выберите хотя бы один день.")
+            raise RuleError("Сначала выберите первый и последний рабочие дни.")
         kind, mode = parts[2].split("_")
         if mode == "text":
             await start_bulk_week_form(callback, state, selection["business_id"], selection["days"], kind)
@@ -166,6 +186,10 @@ async def apply_bulk_week_intervals(event, app, actor, business_id, days, select
             planned[day] = intervals(
                 ", ".join(f"{hhmm(item.start)}-{hhmm(item.end)}" for item in values)
             )
+    if kind == "work" and not append:
+        for day in range(7):
+            if day not in days:
+                planned[day] = []
     conflicts = {}
     for day, values_for_day in planned.items():
         for appointment in await app.edit_schedule(actor, business_id, day, "intervals", values_for_day):

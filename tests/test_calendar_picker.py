@@ -113,7 +113,7 @@ async def test_coloured_calendar_and_interval_buttons(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_one_interval_applies_to_selected_weekdays(tmp_path):
+async def test_one_interval_applies_to_weekday_range_and_closes_other_days(tmp_path):
     timezone = ZoneInfo("Asia/Yekaterinburg")
     app = build_app(Settings("test:token", "memory", tmp_path / "unused.json", timezone))
     app.clock = lambda: datetime(2026, 11, 20, 9, tzinfo=timezone)
@@ -123,22 +123,31 @@ async def test_one_interval_applies_to_selected_weekdays(tmp_path):
     event.data = f"weekselect:{business.id}"
     await select_weekdays(event, state, app, owner.id)
     selection = (await state.get_data())["week_selection"]
-    event.data = f"weekpick:{selection['nonce']}:toggle:0"
+    event.data = f"weekpick:{selection['nonce']}:pick:0"
     await choose_weekdays(event, state, app, owner.id)
+    selection = (await state.get_data())["week_selection"]
+    assert selection["start"] == 0 and selection["days"] == []
+    event.data = f"weekpick:{selection['nonce']}:pick:4"
+    await choose_weekdays(event, state, app, owner.id)
+    selection = (await state.get_data())["week_selection"]
+    assert selection["days"] == [0, 1, 2, 3, 4]
     markup = event.messages[-1][1]
     assert any(button.text == "Рабочее время: кнопками" for row in markup.inline_keyboard for button in row)
 
-    context = {"business_id": business.id, "days": [0, 1, 2, 4], "append": False}
+    await app.edit_schedule(owner.id, business.id, 5, "intervals", [Interval(start=600, end=660)])
+    context = {"business_id": business.id, "days": selection["days"], "append": False}
     await save_bulk_week_intervals(event, app, owner.id, {"start": 600, "end": 1080}, context)
     rules = {rule.weekday: rule for rule in await app.schedule(owner.id, business.id)}
-    assert set(rules) == {0, 1, 2, 4}
-    assert all(rule.intervals == [Interval(start=600, end=1080)] for rule in rules.values())
+    assert set(rules) == set(range(7))
+    assert all(rules[day].intervals == [Interval(start=600, end=1080)] for day in range(5))
+    assert all(rules[day].intervals == [] for day in (5, 6))
     await apply_bulk_week_intervals(
-        event, app, owner.id, business.id, [0, 1, 2, 4],
+        event, app, owner.id, business.id, selection["days"],
         [Interval(start=780, end=840)], "break",
     )
     rules = {rule.weekday: rule for rule in await app.schedule(owner.id, business.id)}
     assert all(
-        rule.intervals == [Interval(start=600, end=780), Interval(start=840, end=1080)]
-        for rule in rules.values()
+        rules[day].intervals == [Interval(start=600, end=780), Interval(start=840, end=1080)]
+        for day in range(5)
     )
+    assert all(rules[day].intervals == [] for day in (5, 6))

@@ -70,7 +70,7 @@ async def show_master_month(event, app, actor, business_id, year, month):
         nav.append(("▶", f"mastermonth:{business_id}:{following[0]}:{following[1]}"))
     if nav:
         rows.append(nav)
-    rows.append([("Выбрать рабочие дни недели", f"weekselect:{business_id}")])
+    rows.append([("Выбрать диапазон рабочих дней", f"weekselect:{business_id}")])
     rows.append([("Изменить срок записи", f"horizon:{business_id}")])
     rows.append([("Ввести дату текстом", f"calendartext:{business_id}")])
     rows.append([("Рабочая неделя", f"week:{business_id}")])
