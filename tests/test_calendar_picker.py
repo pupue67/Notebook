@@ -11,7 +11,9 @@ from notebook_bot.bot.schedule import (
     save_bulk_week_intervals,
     apply_bulk_week_intervals,
     choose_weekdays,
+    day_limit,
     select_weekdays,
+    set_day_limit,
     start_interval_form,
     start_interval_picker,
 )
@@ -86,6 +88,14 @@ async def test_coloured_calendar_and_interval_buttons(tmp_path):
     await open_calendar(event, app, owner.id)
     calendar_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
     assert any(button.callback_data == f"dayrule:{business.id}:{day.isoformat()}" for button in calendar_buttons)
+
+    event.data = f"daylimit:{business.id}:{day.isoformat()}"
+    await day_limit(event, app, owner.id)
+    limit_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
+    assert any(button.text == "4" for button in limit_buttons)
+    event.data = f"setdaylimit:{business.id}:{day.isoformat()}:4"
+    await set_day_limit(event, app, owner.id)
+    assert (await app.schedule(owner.id, business.id, day))[2] == 4
 
     await show_master_month(event, app, owner.id, business.id, 2027, 1)
     january_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]

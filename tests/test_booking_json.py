@@ -83,6 +83,35 @@ async def test_memory_mode_does_not_write_json(tmp_path):
     assert not settings.data_file.exists()
 
 
+@pytest.mark.asyncio
+async def test_date_limit_blocks_fifth_client_with_free_work_hours(tmp_path):
+    timezone = ZoneInfo("Asia/Yekaterinburg")
+    now = datetime(2026, 11, 20, 9, tzinfo=timezone)
+    settings = Settings("test:token", "json", tmp_path / "notebook.json", timezone)
+    app = build_app(settings)
+    app.clock = lambda: now
+    owner = await app.user(201, "Мастер")
+    clients = [await app.user(202 + index, f"Клиент {index}") for index in range(5)]
+    business = await app.create_business(owner.id, "Студия", "Мастер", "Услуги", "at_master", "Адрес", "")
+    service = await app.save_service(owner.id, business.id, "Услуга", 1000, "fixed", 60)
+    day = now.date() + timedelta(days=3)
+    await app.edit_schedule(owner.id, business.id, day.weekday(), "intervals", [Interval(start=600, end=1080)])
+    await app.edit_schedule(owner.id, business.id, day, "limit", "4")
+
+    for client, hour in zip(clients[:4], range(10, 14)):
+        await app.create(client.id, service.id, datetime(2026, 11, 23, hour, tzinfo=timezone))
+    assert (await app.schedule(owner.id, business.id, day))[2] == 4
+    assert await app.times(clients[4].id, service.id, day) == []
+    assert (await app.calendar_days(clients[4].id, business.id, day.year, day.month, service.id))[day] == "busy"
+    with pytest.raises(RuleError, match="недоступно"):
+        await app.create(clients[4].id, service.id, datetime(2026, 11, 23, 14, tzinfo=timezone))
+
+    reopened = build_app(settings)
+    reopened.clock = lambda: now
+    assert (await reopened.schedule(owner.id, business.id, day))[2] == 4
+    assert any(slot.hour == 14 for slot in await reopened.times(clients[4].id, service.id, day + timedelta(days=7)))
+
+
 def test_second_process_cannot_lock_same_file(tmp_path):
     path = tmp_path / "notebook.json.lock"
     with process_lock(path):

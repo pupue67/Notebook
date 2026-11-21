@@ -267,7 +267,6 @@ async def render_day(event, app, actor, id, key):
         buttons = [
             ("Изменить интервалы этого дня" if work else "Сделать рабочим: ввести время", "intervals"),
             ("Закрыть часть дня", "closed"),
-            ("Изменить лимит", "limit"),
             ("Добавить комментарий", "comment"),
             ("Адрес этой даты", "address"),
             ("Убрать разовые закрытия", "clear_closed"),
@@ -280,6 +279,8 @@ async def render_day(event, app, actor, id, key):
             description,
             one(
                 *[(label, f"sched:{id}:{key}:{field}") for label, field in buttons],
+                (f"Лимит записей: {limit if limit is not None else 'без лимита'}",
+                 f"daylimit:{id}:{key}"),
                 ("Выбрать рабочее время кнопками" if work else "Сделать рабочим: выбрать время",
                  f"intervalbuttons:{id}:{key}:intervals"),
                 ("Закрыть время кнопками", f"intervalbuttons:{id}:{key}:closed"),
@@ -296,6 +297,38 @@ async def render_day(event, app, actor, id, key):
 async def day(callback, app, actor):
     _, id, key = callback.data.split(":")
     await render_day(callback, app, actor, id, key)
+
+
+@router.callback_query(F.data.startswith("daylimit:"))
+async def day_limit(callback, app, actor):
+    _, id, key = callback.data.split(":")
+    selected = date.fromisoformat(key)
+    _, _, limit, _, _ = await app.schedule(actor, id, selected)
+    buttons = [(str(value), f"setdaylimit:{id}:{key}:{value}",
+                "primary" if value == limit else None) for value in range(1, 9)]
+    rows = [buttons[index:index + 4] for index in range(0, len(buttons), 4)]
+    rows.extend([
+        [("Без лимита", f"setdaylimit:{id}:{key}:-")],
+        [("Ввести другое число", f"limittext:{id}:{key}")],
+        [("К дате", f"dayrule:{id}:{key}")],
+    ])
+    await send(callback, f"Лимит записей на {selected:%d.%m.%Y}: "
+               f"{limit if limit is not None else 'без лимита'}. Выберите максимум клиентов на этот день.",
+               kb(*rows))
+
+
+@router.callback_query(F.data.startswith("setdaylimit:"))
+async def set_day_limit(callback, app, actor):
+    _, id, key, value = callback.data.split(":")
+    conflicts = await app.edit_schedule(actor, id, date.fromisoformat(key), "limit", value)
+    await show_conflicts(callback, conflicts, id, key)
+
+
+@router.callback_query(F.data.startswith("limittext:"))
+async def day_limit_text(callback, state: FSMContext):
+    _, id, key = callback.data.split(":")
+    date.fromisoformat(key)
+    await manual_schedule_form(callback, state, id, key, "limit")
 
 
 @router.callback_query(F.data.startswith("sched:"))
