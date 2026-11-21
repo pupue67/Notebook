@@ -330,7 +330,8 @@ class Catalog:
                     result.append(day)
             return result
 
-    async def calendar_days(self, actor, business_id, year, month, service_id=None, appointment_id=None):
+    async def calendar_days(self, actor, business_id, year, month, service_id=None, appointment_id=None,
+                            duration=None):
         """Return free, busy, off or outside for each day of a displayed month."""
         async with self.repo.transaction() as tx:
             business = await tx.get(Business, business_id)
@@ -343,7 +344,6 @@ class Catalog:
                 services = [service]
                 clients = await tx.list(Client, business_id=business_id, user_id=actor)
                 client_id = clients[0].id if clients else None
-                duration = None
                 if appointment_id:
                     appointment = await tx.get(Appointment, appointment_id)
                     client = await tx.get(Client, appointment.client_id) if appointment else None
@@ -383,14 +383,14 @@ class Catalog:
                         break
             return result
 
-    async def times(self, actor, service_id, day, appointment_id=None):
+    async def times(self, actor, service_id, day, appointment_id=None, duration=None):
         async with self.repo.transaction() as tx:
             s = await tx.get(Service, service_id)
             if not s:
                 raise RuleError("Услуга не найдена.")
             b = await tx.get(Business, s.business_id)
             clients = await tx.list(Client, business_id=b.id, user_id=actor)
-            client_id, duration = (clients[0].id if clients else None), None
+            client_id = clients[0].id if clients else None
             if appointment_id:
                 a = await tx.get(Appointment, appointment_id)
                 c = await tx.get(Client, a.client_id) if a else None

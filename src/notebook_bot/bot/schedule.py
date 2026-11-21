@@ -276,8 +276,7 @@ async def render_day(event, app, actor, id, key):
             event,
             description,
             one(
-                ("Изменить рабочее время" if work else "Сделать день рабочим",
-                 f"intervalbuttons:{id}:{key}:intervals"),
+                ("Интервалы этой даты", f"intervalbuttons:{id}:{key}:intervals"),
                 (f"Лимит записей: {limit if limit is not None else 'без лимита'}",
                  f"daylimit:{id}:{key}"),
                 *([("Сделать день выходным", f"sched:{id}:{key}:day_off")] if work else []),
@@ -316,8 +315,7 @@ async def interval_menu(callback, app, actor):
 async def interval_text(callback, state: FSMContext, app, actor):
     _, id, key = callback.data.split(":")
     date.fromisoformat(key)
-    await app.owned_business(actor, id)
-    await manual_schedule_form(callback, state, id, key, "intervals")
+    await start_interval_picker(callback, state, app, actor, id, key, "intervals")
 
 
 @router.callback_query(F.data.startswith("dayextra:"))
@@ -400,7 +398,10 @@ async def edit(callback, state: FSMContext, app, actor):
         )
         await show_conflicts(callback, conflicts, id, key)
         return
-    if field in ("intervals", "closed"):
+    if field == "intervals":
+        await start_interval_picker(callback, state, app, actor, id, key, field)
+        return
+    if field == "closed":
         await start_interval_form(callback, state, id, key, field)
         return
     await manual_schedule_form(callback, state, id, key, field)

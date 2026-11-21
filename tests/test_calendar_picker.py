@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from notebook_bot.bot.calendar import month_rows, show_master_month
+from notebook_bot.bot.appointments import manual, manual_pick, save_manual_name
 from notebook_bot.bot.schedule import (
     calendar as open_calendar,
     add_bulk_interval,
@@ -15,6 +16,7 @@ from notebook_bot.bot.schedule import (
     confirm_date_reset,
     day_limit,
     day_extra,
+    edit,
     render_day,
     select_weekdays,
     set_day_limit,
@@ -97,9 +99,12 @@ async def test_coloured_calendar_and_interval_buttons(tmp_path):
     await render_day(event, app, owner.id, business.id, day.isoformat())
     assert "График недели: 10:00–11:00, 12:00–13:00" in event.messages[-1][0]
     day_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
-    assert any(button.text == "Изменить рабочее время" for button in day_buttons)
+    assert any(button.text == "Интервалы этой даты" for button in day_buttons)
     assert any(button.callback_data == f"intervalbuttons:{business.id}:{day.isoformat()}:intervals"
                for button in day_buttons)
+    event.data = f"sched:{business.id}:{day.isoformat()}:intervals"
+    await edit(event, state, app, owner.id)
+    assert (await state.get_data())["picker"]["key"] == day.isoformat()
     assert any(button.text == "Посмотреть график недели" for button in day_buttons)
     assert not any("Закрыть часть дня" in button.text for button in day_buttons)
     event.data = f"dayextra:{business.id}:{day.isoformat()}"
@@ -219,3 +224,45 @@ async def test_five_minute_picker_adds_second_interval_to_weekday_range(tmp_path
     rules = {rule.weekday: rule for rule in await app.schedule(owner.id, business.id)}
     assert all(rules[day].intervals == [Interval(start=555, end=645), Interval(start=660, end=725)]
                for day in (0, 1))
+
+
+@pytest.mark.asyncio
+async def test_master_manual_booking_shows_only_free_slots_and_existing_visits(tmp_path):
+    timezone = ZoneInfo("Asia/Yekaterinburg")
+    app = build_app(Settings("test:token", "memory", tmp_path / "unused.json", timezone))
+    app.clock = lambda: datetime(2026, 11, 20, 9, tzinfo=timezone)
+    owner = await app.user(301, "Мастер")
+    client = await app.user(302, "Клиент")
+    business = await app.create_business(owner.id, "Студия", "Мастер", "Услуги", "at_master", "Адрес", "")
+    service = await app.save_service(owner.id, business.id, "Стрижка", 1000, "fixed", 60)
+    day = app.clock().date() + timedelta(days=3)
+    await app.edit_schedule(owner.id, business.id, day.weekday(), "intervals", [Interval(start=600, end=780)])
+    await app.create(client.id, service.id, datetime(2026, 11, 23, 10, tzinfo=timezone))
+
+    state, event = State(), Event()
+    event.data = f"manual:{business.id}:-"
+    await manual(event, state, app, owner.id)
+    selection = (await state.get_data())["manual"]
+    event.data = f"manualpick:{selection['nonce']}:service:0"
+    await manual_pick(event, state, app, owner.id)
+    selection = (await state.get_data())["manual"]
+    event.data = f"manualpick:{selection['nonce']}:duration:60"
+    await manual_pick(event, state, app, owner.id)
+    selection = (await state.get_data())["manual"]
+    event.data = f"manualpick:{selection['nonce']}:day:{day.isoformat()}"
+    await manual_pick(event, state, app, owner.id)
+    selection = (await state.get_data())["manual"]
+    assert "10:00 Клиент · Стрижка" in event.messages[-1][0]
+    assert all(datetime.fromisoformat(slot).hour != 10 for slot in selection["slots"])
+    free_index = next(index for index, slot in enumerate(selection["slots"])
+                      if datetime.fromisoformat(slot).hour == 11)
+    event.data = f"manualpick:{selection['nonce']}:time:{free_index}"
+    await manual_pick(event, state, app, owner.id)
+    selection = (await state.get_data())["manual"]
+    event.data = f"manualpick:{selection['nonce']}:save:0"
+    await manual_pick(event, state, app, owner.id)
+    form_data = await state.get_data()
+    await save_manual_name(event, app, owner.id, {"client_name": "Новый клиент"}, form_data["context"])
+    appointments = await app.appointments(owner.id, business.id, day)
+    assert len(appointments) == 2
+    assert [appointment.start.hour for appointment in appointments] == [10, 11]

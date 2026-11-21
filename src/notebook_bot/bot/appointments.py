@@ -1,9 +1,12 @@
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
+from secrets import token_hex
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 
+from ..logic.availability import occupies
 from ..logic.rules import RuleError, number
-from .common import HOME, form, one, send, start_form
+from .calendar import month_rows, shift_month
+from .common import HOME, form, kb, one, send, start_form
 
 router = Router(name="appointments")
 STATUSES = {
@@ -226,50 +229,181 @@ async def client(callback, app, actor):
 @router.callback_query(F.data.startswith("manualclient:"))
 async def manual(callback, state: FSMContext, app, actor):
     action, b, extra = callback.data.split(":")
-    async with app.repo.transaction() as tx:
-        await app.owner(tx, actor, b)
-    services = await app.services(b)
+    await app.owned_business(actor, b)
+    await state.clear()
+    selection = {"business_id": b, "page": 0}
+    if action == "manualclient":
+        if not any(client.id == extra for client in await app.clients(actor, b)):
+            raise RuleError("Клиент не найден.")
+        selection["client_id"] = extra
+    if action == "manual" and extra != "-":
+        selection["day"] = date.fromisoformat(extra).isoformat()
+    await state.update_data(manual=selection)
+    await show_manual_services(callback, state, app)
+
+
+async def show_manual_services(event, state, app):
+    selection = (await state.get_data())["manual"]
+    services = await app.services(selection["business_id"])
     if not services:
         raise RuleError("Сначала добавьте услугу.")
-    context = {"business_id": b, "service_ids": [s.id for s in services]}
-    fields = []
-    if action == "manualclient":
-        context["client_id"] = extra
-    else:
-        fields.append(
-            ("client_name", "Имя нового клиента (для существующего откройте его карточку):", "text")
-        )
-    fields.append(
-        (
-            "service",
-            "Номер услуги:\n" + "\n".join(f"{i + 1}. {s.name}" for i, s in enumerate(services)),
-            "number",
-        )
-    )
-    if action == "manual" and extra != "-":
-        context["day"] = extra
-    else:
-        fields.append(("day", "Дата (ДД.ММ.ГГГГ):", "date"))
-    fields += [("minute", "Время начала (ЧЧ:ММ):", "time"), ("duration", "Длительность (минуты):", "minutes")]
-    await start_form(callback, state, "manual", fields, context)
+    nonce = token_hex(3)
+    selection.update(nonce=nonce, service_ids=[service.id for service in services])
+    await state.update_data(manual=selection)
+    await send(event, "Ручная запись: выберите услугу.", one(
+        *[(f"{service.name} · {service.duration_min} мин", f"manualpick:{nonce}:service:{index}")
+          for index, service in enumerate(services)], HOME,
+    ))
 
 
-@form("manual")
-async def save_manual(message, app, actor, values, context):
-    index = number(values["service"], 1, len(context["service_ids"])) - 1
-    minute = values["minute"]
-    stamp = datetime.combine(
-        date.fromisoformat(context.get("day") or values["day"]),
-        time(minute // 60, minute % 60),
-        tzinfo=app.timezone,
-    )
+async def show_manual_duration(event, state, app):
+    selection = (await state.get_data())["manual"]
+    service = await app.service(selection["service_id"])
+    nonce = token_hex(3)
+    selection["nonce"] = nonce
+    await state.update_data(manual=selection)
+    options = sorted({service.duration_min, 30, 45, 60, 90, 120, 180})
+    await send(event, f"{service.name}: выберите длительность. После записи её можно изменить в карточке.",
+               kb(*[[(f"{minutes} мин", f"manualpick:{nonce}:duration:{minutes}")
+                     for minutes in options[index:index + 3]]
+                    for index in range(0, len(options), 3)], [HOME]))
+
+
+async def show_manual_calendar(event, state, app, actor):
+    selection = (await state.get_data())["manual"]
+    business = await app.owned_business(actor, selection["business_id"])
+    today = app.clock().date()
+    page = selection.get("page", 0)
+    year, month = shift_month(today.year, today.month, page)
+    statuses = await app.calendar_days(actor, business.id, year, month,
+                                       selection["service_id"], duration=selection["duration"])
+    nonce = token_hex(3)
+    selection["nonce"] = nonce
+    await state.update_data(manual=selection)
+    rows = month_rows(year, month, statuses,
+                      lambda day: f"manualpick:{nonce}:day:{day.isoformat()}"
+                      if statuses[day] == "free" else "hnoop")
+    last = min(today + timedelta(days=business.horizon_days), today + timedelta(days=180))
+    if business.booking_until:
+        last = min(last, business.booking_until)
+    navigation = []
+    if page:
+        navigation.append(("◀", f"manualpick:{nonce}:page:{page - 1}"))
+    if date(*shift_month(year, month, 1), 1) <= last:
+        navigation.append(("▶", f"manualpick:{nonce}:page:{page + 1}"))
+    if navigation:
+        rows.append(navigation)
+    rows.append([HOME])
+    await send(event, f"Ручная запись · {month:02d}.{year}\n"
+               "Синий — есть свободное время; красный — мест нет. Выберите дату:", kb(*rows))
+
+
+async def show_manual_times(event, state, app, actor):
+    selection = (await state.get_data())["manual"]
+    day = date.fromisoformat(selection["day"])
+    slots = await app.times(actor, selection["service_id"], day, duration=selection["duration"])
+    appointments = [item for item in await app.appointments(actor, selection["business_id"], day)
+                    if occupies(item, app.clock())]
+    clients = {client.id: client.name for client in await app.clients(actor, selection["business_id"])}
+    nonce = token_hex(3)
+    selection.update(nonce=nonce, slots=[slot.isoformat() for slot in slots])
+    await state.update_data(manual=selection)
+    page = selection.get("time_page", 0)
+    items = [(f"{slot:%H:%M}", f"manualpick:{nonce}:time:{index}")
+             for index, slot in enumerate(slots)
+             if page * 24 <= index < (page + 1) * 24]
+    rows = [items[index:index + 3] for index in range(0, len(items), 3)]
+    navigation = []
+    if page:
+        navigation.append(("◀", f"manualpick:{nonce}:times:{page - 1}"))
+    if (page + 1) * 24 < len(slots):
+        navigation.append(("▶", f"manualpick:{nonce}:times:{page + 1}"))
+    if navigation:
+        rows.append(navigation)
+    rows.append([("Посмотреть записи этой даты", f"dayapps:{selection['business_id']}:{day.isoformat()}")])
+    rows.append([("Другая дата", f"manualpick:{nonce}:calendar:0")])
+    summary = "\n".join(
+        f"{item.start:%H:%M} {clients.get(item.client_id, 'Клиент')} · {item.service_name}"
+        for item in appointments[:10]
+    ) or "нет"
+    availability = "Выберите время:" if slots else "Свободного времени нет. Выберите другую дату."
+    await send(event, f"{day:%d.%m.%Y} · уже записаны:\n{summary}\n\n"
+               f"Свободное время для {selection['duration']} мин. {availability}", kb(*rows))
+
+
+@router.callback_query(F.data.startswith("manualpick:"))
+async def manual_pick(callback, state: FSMContext, app, actor):
+    _, nonce, action, value = callback.data.split(":")
+    selection = (await state.get_data()).get("manual")
+    if not selection or selection.get("nonce") != nonce:
+        raise RuleError("Выбор устарел. Откройте ручную запись заново.")
+    await app.owned_business(actor, selection["business_id"])
+    if action == "service":
+        index = int(value)
+        if not 0 <= index < len(selection["service_ids"]):
+            raise RuleError("Услуга недоступна.")
+        selection["service_id"] = selection["service_ids"][index]
+        await state.update_data(manual=selection)
+        await show_manual_duration(callback, state, app)
+    elif action == "duration":
+        selection["duration"] = number(value, 1, 1440)
+        await state.update_data(manual=selection)
+        if selection.get("day"):
+            await show_manual_times(callback, state, app, actor)
+        else:
+            await show_manual_calendar(callback, state, app, actor)
+    elif action in ("page", "calendar"):
+        selection["page"] = max(0, int(value))
+        selection.pop("day", None)
+        await state.update_data(manual=selection)
+        await show_manual_calendar(callback, state, app, actor)
+    elif action == "day":
+        selection.update(day=date.fromisoformat(value).isoformat(), time_page=0)
+        await state.update_data(manual=selection)
+        await show_manual_times(callback, state, app, actor)
+    elif action == "times":
+        selection["time_page"] = max(0, int(value))
+        await state.update_data(manual=selection)
+        await show_manual_times(callback, state, app, actor)
+    elif action == "time":
+        index = int(value)
+        if not 0 <= index < len(selection["slots"]):
+            raise RuleError("Время устарело. Выберите дату заново.")
+        selection["start"] = selection["slots"][index]
+        new_nonce = token_hex(3)
+        selection["nonce"] = new_nonce
+        await state.update_data(manual=selection)
+        service = await app.service(selection["service_id"])
+        await send(callback, f"Ручная запись\n{service.name}\n"
+                   f"{datetime.fromisoformat(selection['start']):%d.%m.%Y %H:%M} · "
+                   f"{selection['duration']} мин\nВремя проверится ещё раз при сохранении.",
+                   one(("Сохранить запись", f"manualpick:{new_nonce}:save:0"),
+                       ("Другое время", f"manualpick:{new_nonce}:back:0")))
+    elif action == "back":
+        await show_manual_times(callback, state, app, actor)
+    elif action == "save":
+        if selection.get("client_id"):
+            appointment = await app.create(actor, selection["service_id"],
+                                           datetime.fromisoformat(selection["start"]),
+                                           client_id=selection["client_id"], duration=selection["duration"])
+            await state.clear()
+            await show_appointment(callback, app, actor, appointment.id)
+        else:
+            await start_form(callback, state, "manual_name",
+                             [("client_name", "Имя клиента:", "text")], selection)
+    else:
+        raise RuleError("Выбор устарел.")
+
+
+@form("manual_name")
+async def save_manual_name(message, app, actor, values, context):
     a = await app.create(
         actor,
-        context["service_ids"][index],
-        stamp,
+        context["service_id"],
+        datetime.fromisoformat(context["start"]),
         client_id=context.get("client_id"),
-        client_name=values.get("client_name"),
-        duration=values["duration"],
+        client_name=values["client_name"],
+        duration=context["duration"],
     )
     await show_appointment(message, app, actor, a.id)
 
