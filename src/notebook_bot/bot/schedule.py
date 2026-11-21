@@ -263,23 +263,25 @@ async def render_day(event, app, actor, id, key):
         work, closed, limit, rule, override = await app.schedule(actor, id, day)
         appointments = await app.appointments(actor, id, day)
         count = sum(a.status in ("booked", "pending_payment", "awaiting_duration") for a in appointments)
-        description = f"{DAYS[day.weekday()]}, {day:%d.%m.%Y}\n\nРабочие интервалы: {render_intervals(work)}\nЗакрыто: {render_intervals(closed) if closed else 'нет'}\nЗаписей: {count} / {limit if limit is not None else 'без лимита'}\nКомментарий недели: {rule.comment if rule else '—'}\nКомментарий даты: {override.comment if override else '—'}"
+        description = f"{DAYS[day.weekday()]}, {day:%d.%m.%Y}\nСтатус: {'рабочий день' if work else 'выходной'}\n\nРабочие интервалы: {render_intervals(work)}\nЗакрыто: {render_intervals(closed) if closed else 'нет'}\nЗаписей: {count} / {limit if limit is not None else 'без лимита'}\nКомментарий недели: {rule.comment if rule else '—'}\nКомментарий даты: {override.comment if override else '—'}"
         buttons = [
-            ("Изменить интервалы этого дня", "intervals"),
+            ("Изменить интервалы этого дня" if work else "Сделать рабочим: ввести время", "intervals"),
             ("Закрыть часть дня", "closed"),
             ("Изменить лимит", "limit"),
             ("Добавить комментарий", "comment"),
             ("Адрес этой даты", "address"),
-            ("Сделать день выходным", "day_off"),
             ("Убрать разовые закрытия", "clear_closed"),
             ("Вернуть обычный график", "reset"),
         ]
+        if work:
+            buttons.insert(5, ("Сделать день выходным", "day_off"))
         await send(
             event,
             description,
             one(
                 *[(label, f"sched:{id}:{key}:{field}") for label, field in buttons],
-                ("Выбрать рабочее время кнопками", f"intervalbuttons:{id}:{key}:intervals"),
+                ("Выбрать рабочее время кнопками" if work else "Сделать рабочим: выбрать время",
+                 f"intervalbuttons:{id}:{key}:intervals"),
                 ("Закрыть время кнопками", f"intervalbuttons:{id}:{key}:closed"),
                 ("Комментарий / адрес конкретного времени", f"timenote:{id}:{key}"),
                 ("Записать клиента вручную", f"manual:{id}:{key}"),
