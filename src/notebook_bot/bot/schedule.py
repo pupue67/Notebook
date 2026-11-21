@@ -70,10 +70,8 @@ async def render_week_selection(event, state):
             [("Изменить диапазон", f"weekpick:{nonce}:reset")],
         ]
         rows.extend([
-            [("Рабочее время: ввести", f"weekpick:{nonce}:work_text", "success")],
-            [("Рабочее время: кнопками", f"weekpick:{nonce}:work_buttons")],
-            [("Общий перерыв: ввести", f"weekpick:{nonce}:break_text")],
-            [("Общий перерыв: кнопками", f"weekpick:{nonce}:break_buttons")],
+            [("Задать рабочее время", f"weekpick:{nonce}:work_buttons")],
+            [("Добавить общий перерыв", f"weekpick:{nonce}:break_buttons")],
         ])
     rows.append([("Рабочая неделя", f"week:{selection['business_id']}")])
     rows.append([HOME])
@@ -142,7 +140,8 @@ async def add_bulk_interval(callback, state: FSMContext, app, actor):
     days = [day for day in range(7) if int(mask) & (1 << day)]
     if not days:
         raise RuleError("Не выбраны рабочие дни.")
-    await start_bulk_week_form(callback, state, business_id, days, kind, append=True)
+    await start_interval_picker(callback, state, app, actor, business_id, "bulk", kind,
+                                days=days, append=True)
 
 
 @form("bulk_week_intervals")
@@ -244,7 +243,6 @@ async def render_day(event, app, actor, id, key):
         rule = next((r for r in rules if r.weekday == weekday), None)
         description = f"{DAYS[weekday]} — график на каждую неделю\n\n{render_intervals(rule.intervals if rule else [])}\nЛимит: {rule.limit if rule and rule.limit is not None else 'без лимита'}\nКомментарий: {rule.comment if rule else '—'}"
         buttons = [
-            ("Изменить рабочие интервалы", "intervals"),
             ("Изменить лимит", "limit"),
             ("Комментарий дня недели", "comment"),
         ]
@@ -253,7 +251,7 @@ async def render_day(event, app, actor, id, key):
             description,
             one(
                 *[(label, f"sched:{id}:{key}:{field}") for label, field in buttons],
-                ("Выбрать время кнопками", f"intervalbuttons:{id}:{key}:intervals"),
+                ("Изменить рабочее время", f"intervalbuttons:{id}:{key}:intervals"),
                 ("Рабочая неделя", f"week:{id}"),
                 HOME,
             ),
@@ -278,7 +276,8 @@ async def render_day(event, app, actor, id, key):
             event,
             description,
             one(
-                ("Изменить рабочее время" if work else "Сделать день рабочим", f"intervalmenu:{id}:{key}"),
+                ("Изменить рабочее время" if work else "Сделать день рабочим",
+                 f"intervalbuttons:{id}:{key}:intervals"),
                 (f"Лимит записей: {limit if limit is not None else 'без лимита'}",
                  f"daylimit:{id}:{key}"),
                 *([("Сделать день выходным", f"sched:{id}:{key}:day_off")] if work else []),
@@ -308,7 +307,6 @@ async def interval_menu(callback, app, actor):
         "Можно задать несколько интервалов, например 10:00–13:00 и 15:00–20:00.",
         one(
             ("Выбрать время кнопками", f"intervalbuttons:{id}:{key}:intervals"),
-            ("Ввести интервалы вручную", f"intervaltext:{id}:{key}"),
             ("К дате", f"dayrule:{id}:{key}"),
         ),
     )
@@ -471,12 +469,12 @@ async def manual_schedule_form(event, state, id, key, field):
     )
 
 
-async def start_interval_picker(event, state, app, actor, id, key, field, days=None):
+async def start_interval_picker(event, state, app, actor, id, key, field, days=None, append=False):
     await app.owned_business(actor, id)
     await state.clear()
     await state.update_data(
         picker={"id": id, "key": key, "field": field, "stage": "start_hour", "items": [],
-                "nonce": token_hex(3), "days": days}
+                "nonce": token_hex(3), "days": days, "append": append}
     )
     await render_interval_picker(event, state)
 
@@ -508,13 +506,12 @@ async def render_interval_picker(event, state):
             buttons = [(f"{value:02d}", f"ipick:{nonce}:value:{value}") for value in values]
             columns = 6
         else:
-            values = [0] if picker.get("hour") == 24 else range(0, 60, 10)
+            values = [0] if picker.get("hour") == 24 else range(0, 60, 5)
             buttons = [(f"{value:02d}", f"ipick:{nonce}:value:{value}") for value in values]
             columns = 3
         rows = [buttons[index:index + columns] for index in range(0, len(buttons), columns)]
     if picker["field"] == "intervals":
         rows.append([("Сделать выходным", f"ipick:{nonce}:off")])
-    rows.append([("Ввести время текстом", f"ipick:{nonce}:manual")])
     rows.append([("Отмена", f"week:{picker['id']}" if picker["days"] else f"dayrule:{picker['id']}:{picker['key']}")])
     await send(event, message, kb(*rows))
 
@@ -548,7 +545,8 @@ async def interval_pick(callback, state: FSMContext, app, actor):
         )
         if picker["days"]:
             await apply_bulk_week_intervals(
-                callback, app, actor, picker["id"], picker["days"], selected, picker["field"]
+                callback, app, actor, picker["id"], picker["days"], selected, picker["field"],
+                append=picker.get("append", False),
             )
             await state.clear()
             return
@@ -569,7 +567,7 @@ async def interval_pick(callback, state: FSMContext, app, actor):
                 raise RuleError("Выберите час кнопкой.")
             if stage == "end_hour" and value * 60 < picker["start"]:
                 raise RuleError("Конец интервала должен быть позже начала.")
-        elif value not in range(0, 60, 10) or (picker.get("hour") == 24 and value != 0):
+        elif value not in range(0, 60, 5) or (picker.get("hour") == 24 and value != 0):
             raise RuleError("Выберите минуты кнопкой.")
         if stage == "start_hour":
             picker["hour"], picker["stage"] = value, "start_minute"

@@ -72,7 +72,6 @@ async def show_master_month(event, app, actor, business_id, year, month):
         rows.append(nav)
     rows.append([("Выбрать диапазон рабочих дней", f"weekselect:{business_id}")])
     rows.append([("Изменить срок записи", f"horizon:{business_id}")])
-    rows.append([("Ввести дату текстом", f"calendartext:{business_id}")])
     rows.append([("Рабочая неделя", f"week:{business_id}")])
     rows.append([HOME])
     booking_last = today + timedelta(days=business.horizon_days)

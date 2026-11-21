@@ -6,6 +6,7 @@ import pytest
 from notebook_bot.bot.calendar import month_rows, show_master_month
 from notebook_bot.bot.schedule import (
     calendar as open_calendar,
+    add_bulk_interval,
     interval_pick,
     save_interval_pair,
     save_bulk_week_intervals,
@@ -14,7 +15,6 @@ from notebook_bot.bot.schedule import (
     confirm_date_reset,
     day_limit,
     day_extra,
-    interval_menu,
     render_day,
     select_weekdays,
     set_day_limit,
@@ -92,19 +92,16 @@ async def test_coloured_calendar_and_interval_buttons(tmp_path):
     await open_calendar(event, app, owner.id)
     calendar_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
     assert any(button.callback_data == f"dayrule:{business.id}:{day.isoformat()}" for button in calendar_buttons)
+    assert not any("Ввести дату текстом" == button.text for button in calendar_buttons)
 
     await render_day(event, app, owner.id, business.id, day.isoformat())
     assert "График недели: 10:00–11:00, 12:00–13:00" in event.messages[-1][0]
     day_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
     assert any(button.text == "Изменить рабочее время" for button in day_buttons)
+    assert any(button.callback_data == f"intervalbuttons:{business.id}:{day.isoformat()}:intervals"
+               for button in day_buttons)
     assert any(button.text == "Посмотреть график недели" for button in day_buttons)
     assert not any("Закрыть часть дня" in button.text for button in day_buttons)
-    event.data = f"intervalmenu:{business.id}:{day.isoformat()}"
-    await interval_menu(event, app, owner.id)
-    interval_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
-    assert {"Выбрать время кнопками", "Ввести интервалы вручную"} <= {
-        button.text for button in interval_buttons
-    }
     event.data = f"dayextra:{business.id}:{day.isoformat()}"
     await day_extra(event, app, owner.id)
     extra_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
@@ -169,7 +166,8 @@ async def test_one_interval_applies_to_weekday_range_and_closes_other_days(tmp_p
     selection = (await state.get_data())["week_selection"]
     assert selection["days"] == [0, 1, 2, 3, 4]
     markup = event.messages[-1][1]
-    assert any(button.text == "Рабочее время: кнопками" for row in markup.inline_keyboard for button in row)
+    assert any(button.text == "Задать рабочее время" for row in markup.inline_keyboard for button in row)
+    assert not any("ввести" in button.text.lower() for row in markup.inline_keyboard for button in row)
 
     await app.edit_schedule(owner.id, business.id, 5, "intervals", [Interval(start=600, end=660)])
     context = {"business_id": business.id, "days": selection["days"], "append": False}
@@ -188,3 +186,36 @@ async def test_one_interval_applies_to_weekday_range_and_closes_other_days(tmp_p
         for day in range(5)
     )
     assert all(rules[day].intervals == [] for day in (5, 6))
+
+
+@pytest.mark.asyncio
+async def test_five_minute_picker_adds_second_interval_to_weekday_range(tmp_path):
+    timezone = ZoneInfo("Asia/Yekaterinburg")
+    app = build_app(Settings("test:token", "memory", tmp_path / "unused.json", timezone))
+    app.clock = lambda: datetime(2026, 11, 20, 9, tzinfo=timezone)
+    owner = await app.user(201, "Мастер")
+    business = await app.create_business(owner.id, "Студия", "Мастер", "Услуги", "at_master", "Адрес", "")
+    state, event = State(), Event()
+    await start_interval_picker(event, state, app, owner.id, business.id, "bulk", "work", days=[0, 1])
+    picker_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
+    assert not any("текстом" in button.text for button in picker_buttons)
+    for value in (9, 15, 10, 45):
+        picker = (await state.get_data())["picker"]
+        event.data = f"ipick:{picker['nonce']}:value:{value}"
+        await interval_pick(event, state, app, owner.id)
+    picker = (await state.get_data())["picker"]
+    event.data = f"ipick:{picker['nonce']}:save"
+    await interval_pick(event, state, app, owner.id)
+
+    event.data = f"bulkadd:{business.id}:3:work"
+    await add_bulk_interval(event, state, app, owner.id)
+    for value in (11, 0, 12, 5):
+        picker = (await state.get_data())["picker"]
+        event.data = f"ipick:{picker['nonce']}:value:{value}"
+        await interval_pick(event, state, app, owner.id)
+    picker = (await state.get_data())["picker"]
+    event.data = f"ipick:{picker['nonce']}:save"
+    await interval_pick(event, state, app, owner.id)
+    rules = {rule.weekday: rule for rule in await app.schedule(owner.id, business.id)}
+    assert all(rules[day].intervals == [Interval(start=555, end=645), Interval(start=660, end=725)]
+               for day in (0, 1))
