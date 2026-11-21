@@ -30,9 +30,157 @@ async def week(callback, app, actor):
         ),
         one(
             *[(name, f"dayrule:{id}:w{i}") for i, name in enumerate(DAYS)],
+            ("Задать одинаковый график нескольким дням", f"weekselect:{id}"),
             ("Календарь дат", f"mastermonth:{id}"),
             ("Последняя дата записи", f"horizon:{id}"),
             HOME,
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("weekselect:"))
+async def select_weekdays(callback, state: FSMContext, app, actor):
+    business_id = callback.data.split(":")[1]
+    await app.owned_business(actor, business_id)
+    await state.clear()
+    await state.update_data(week_selection={"business_id": business_id, "days": [], "nonce": token_hex(3)})
+    await render_week_selection(callback, state)
+
+
+async def render_week_selection(event, state):
+    selection = (await state.get_data())["week_selection"]
+    nonce = selection["nonce"]
+    buttons = [
+        (f"{'✓ ' if day in selection['days'] else ''}{name}", f"weekpick:{nonce}:toggle:{day}",
+         "primary" if day in selection["days"] else None)
+        for day, name in enumerate(DAYS)
+    ]
+    rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
+    if selection["days"]:
+        rows.extend([
+            [("Рабочее время: ввести", f"weekpick:{nonce}:work_text", "success")],
+            [("Рабочее время: кнопками", f"weekpick:{nonce}:work_buttons")],
+            [("Общий перерыв: ввести", f"weekpick:{nonce}:break_text")],
+            [("Общий перерыв: кнопками", f"weekpick:{nonce}:break_buttons")],
+        ])
+    rows.append([("Рабочая неделя", f"week:{selection['business_id']}")])
+    rows.append([HOME])
+    await send(
+        event,
+        "Отметьте рабочие дни недели. Синие дни выбраны. Затем задайте одно время начала и конца для всех.",
+        kb(*rows),
+    )
+
+
+@router.callback_query(F.data.startswith("weekpick:"))
+async def choose_weekdays(callback, state: FSMContext, app, actor):
+    parts = callback.data.split(":")
+    selection = (await state.get_data()).get("week_selection")
+    if not selection or selection["nonce"] != parts[1]:
+        raise RuleError("Выбор дней устарел. Откройте рабочую неделю заново.")
+    await app.owned_business(actor, selection["business_id"])
+    if parts[2] == "toggle":
+        day = int(parts[3])
+        if not 0 <= day <= 6:
+            raise RuleError("Неизвестный день недели.")
+        days = set(selection["days"])
+        days.symmetric_difference_update({day})
+        selection["days"] = sorted(days)
+        selection["nonce"] = token_hex(3)
+        await state.update_data(week_selection=selection)
+        await render_week_selection(callback, state)
+    elif parts[2] in ("work_text", "work_buttons", "break_text", "break_buttons"):
+        if not selection["days"]:
+            raise RuleError("Сначала выберите хотя бы один день.")
+        kind, mode = parts[2].split("_")
+        if mode == "text":
+            await start_bulk_week_form(callback, state, selection["business_id"], selection["days"], kind)
+        else:
+            await start_interval_picker(
+                callback, state, app, actor, selection["business_id"], "bulk", kind,
+                days=selection["days"],
+            )
+    else:
+        raise RuleError("Выбор дней устарел.")
+
+
+async def start_bulk_week_form(event, state, business_id, days, kind="work", append=False):
+    await start_form(
+        event, state, "bulk_week_intervals",
+        [
+            ("start", f"Начало {'работы' if kind == 'work' else 'перерыва'} для выбранных дней (ЧЧ:ММ):", "time"),
+            ("end", f"Конец {'работы' if kind == 'work' else 'перерыва'} для выбранных дней (ЧЧ:ММ):", "end_time"),
+        ],
+        {"business_id": business_id, "days": days, "kind": kind, "append": append},
+    )
+
+
+@router.callback_query(F.data.startswith("bulkadd:"))
+async def add_bulk_interval(callback, state: FSMContext, app, actor):
+    _, business_id, mask, kind = callback.data.split(":")
+    await app.owned_business(actor, business_id)
+    days = [day for day in range(7) if int(mask) & (1 << day)]
+    if not days:
+        raise RuleError("Не выбраны рабочие дни.")
+    await start_bulk_week_form(callback, state, business_id, days, kind, append=True)
+
+
+@form("bulk_week_intervals")
+async def save_bulk_week_intervals(message, app, actor, values, context):
+    start, end = values["start"], values["end"]
+    if start >= end:
+        raise RuleError("Конец интервала должен быть позже начала.")
+    business_id, days = context["business_id"], context["days"]
+    await apply_bulk_week_intervals(
+        message, app, actor, business_id, days,
+        [Interval(start=start, end=end)], context.get("kind", "work"), context["append"],
+    )
+
+
+async def apply_bulk_week_intervals(event, app, actor, business_id, days, selected, kind, append=False):
+    rules = {rule.weekday: rule for rule in await app.schedule(actor, business_id)}
+    planned = {}
+    for day in days:
+        current = rules[day].intervals if day in rules else []
+        if kind == "break":
+            if not current:
+                raise RuleError(f"Для {DAYS[day]} сначала задайте рабочее время.")
+            result = list(current)
+            for block in selected:
+                if not any(item.start <= block.start and block.end <= item.end for item in result):
+                    raise RuleError(f"Перерыв должен помещаться в рабочее время: {DAYS[day]}.")
+                result = [
+                    part
+                    for item in result
+                    for part in (
+                        [Interval(start=item.start, end=min(block.start, item.end))]
+                        if item.start < block.start < item.end else []
+                    ) + (
+                        [Interval(start=max(block.end, item.start), end=item.end)]
+                        if item.start < block.end < item.end else []
+                    ) + ([item] if block.end <= item.start or block.start >= item.end else [])
+                ]
+            planned[day] = result
+        else:
+            values = [*(current if append else []), *selected]
+            planned[day] = intervals(
+                ", ".join(f"{hhmm(item.start)}-{hhmm(item.end)}" for item in values)
+            )
+    conflicts = {}
+    for day, values_for_day in planned.items():
+        for appointment in await app.edit_schedule(actor, business_id, day, "intervals", values_for_day):
+            conflicts[appointment.id] = appointment
+    mask = sum(1 << day for day in days)
+    names = ", ".join(DAYS[day] for day in days)
+    message_text = f"{'Общий перерыв' if kind == 'break' else 'Общее рабочее время'} сохранено для: {names}."
+    if conflicts:
+        message_text += f"\nПроверьте {len(conflicts)} существующих записей с конфликтами."
+    await send(
+        event, message_text,
+        one(
+            ("Добавить ещё общий интервал" if kind == "work" else "Добавить ещё перерыв",
+             f"bulkadd:{business_id}:{mask}:{kind}"),
+            ("Рабочая неделя", f"week:{business_id}"), HOME,
         ),
     )
 
@@ -202,12 +350,12 @@ async def manual_schedule_form(event, state, id, key, field):
     )
 
 
-async def start_interval_picker(event, state, app, actor, id, key, field):
+async def start_interval_picker(event, state, app, actor, id, key, field, days=None):
     await app.owned_business(actor, id)
     await state.clear()
     await state.update_data(
         picker={"id": id, "key": key, "field": field, "stage": "start_hour", "items": [],
-                "nonce": token_hex(3)}
+                "nonce": token_hex(3), "days": days}
     )
     await render_interval_picker(event, state)
 
@@ -215,7 +363,11 @@ async def start_interval_picker(event, state, app, actor, id, key, field):
 async def render_interval_picker(event, state):
     picker = (await state.get_data())["picker"]
     nonce, stage = picker["nonce"], picker["stage"]
-    name = "Рабочие интервалы" if picker["field"] == "intervals" else "Закрытые промежутки"
+    name = (
+        "Общее рабочее время" if picker["days"] and picker["field"] == "work"
+        else "Общий перерыв" if picker["days"] else
+        "Рабочие интервалы" if picker["field"] == "intervals" else "Закрытые промежутки"
+    )
     selected = ", ".join(f"{hhmm(item['start'])}–{hhmm(item['end'])}" for item in picker["items"])
     message = f"{name}\nВыбрано: {selected or 'пока ничего'}\n"
     if stage == "review":
@@ -242,7 +394,7 @@ async def render_interval_picker(event, state):
     if picker["field"] == "intervals":
         rows.append([("Сделать выходным", f"ipick:{nonce}:off")])
     rows.append([("Ввести время текстом", f"ipick:{nonce}:manual")])
-    rows.append([("Отмена", f"dayrule:{picker['id']}:{picker['key']}")])
+    rows.append([("Отмена", f"week:{picker['id']}" if picker["days"] else f"dayrule:{picker['id']}:{picker['key']}")])
     await send(event, message, kb(*rows))
 
 
@@ -255,7 +407,12 @@ async def interval_pick(callback, state: FSMContext, app, actor):
     await app.owned_business(actor, picker["id"])
     action = parts[2]
     if action == "manual":
-        await start_interval_form(callback, state, picker["id"], picker["key"], picker["field"])
+        if picker["days"]:
+            await start_bulk_week_form(
+                callback, state, picker["id"], picker["days"], picker["field"]
+            )
+        else:
+            await start_interval_form(callback, state, picker["id"], picker["key"], picker["field"])
         return
     if action == "off" and picker["field"] == "intervals":
         picker["items"] = []
@@ -268,6 +425,12 @@ async def interval_pick(callback, state: FSMContext, app, actor):
             ", ".join(f"{hhmm(item['start'])}-{hhmm(item['end'])}" for item in picker["items"])
             if picker["items"] else "-"
         )
+        if picker["days"]:
+            await apply_bulk_week_intervals(
+                callback, app, actor, picker["id"], picker["days"], selected, picker["field"]
+            )
+            await state.clear()
+            return
         conflicts = await app.edit_schedule(
             actor, picker["id"], int(key[1:]) if key.startswith("w") else date.fromisoformat(key),
             picker["field"], selected,
