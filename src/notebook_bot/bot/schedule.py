@@ -264,30 +264,16 @@ async def render_day(event, app, actor, id, key):
         appointments = await app.appointments(actor, id, day)
         count = sum(a.status in ("booked", "pending_payment", "awaiting_duration") for a in appointments)
         description = f"{DAYS[day.weekday()]}, {day:%d.%m.%Y}\nСтатус: {'рабочий день' if work else 'выходной'}\n\nРабочие интервалы: {render_intervals(work)}\nЗакрыто: {render_intervals(closed) if closed else 'нет'}\nЗаписей: {count} / {limit if limit is not None else 'без лимита'}\nКомментарий недели: {rule.comment if rule else '—'}\nКомментарий даты: {override.comment if override else '—'}"
-        buttons = [
-            ("Изменить интервалы этого дня" if work else "Сделать рабочим: ввести время", "intervals"),
-            ("Закрыть часть дня", "closed"),
-            ("Добавить комментарий", "comment"),
-            ("Адрес этой даты", "address"),
-            ("Убрать разовые закрытия", "clear_closed"),
-            ("Вернуть обычный график", "reset"),
-        ]
-        if work:
-            buttons.insert(5, ("Сделать день выходным", "day_off"))
         await send(
             event,
             description,
             one(
-                *[(label, f"sched:{id}:{key}:{field}") for label, field in buttons],
+                ("Изменить рабочее время" if work else "Сделать день рабочим", f"intervalmenu:{id}:{key}"),
                 (f"Лимит записей: {limit if limit is not None else 'без лимита'}",
                  f"daylimit:{id}:{key}"),
-                ("Выбрать рабочее время кнопками" if work else "Сделать рабочим: выбрать время",
-                 f"intervalbuttons:{id}:{key}:intervals"),
-                ("Закрыть время кнопками", f"intervalbuttons:{id}:{key}:closed"),
-                ("Комментарий / адрес конкретного времени", f"timenote:{id}:{key}"),
-                ("Записать клиента вручную", f"manual:{id}:{key}"),
-                ("Открыть записи этой даты", f"dayapps:{id}:{key}"),
-                (f"Изменить обычный график: {DAYS[day.weekday()]}", f"dayrule:{id}:w{day.weekday()}"),
+                *([("Сделать день выходным", f"sched:{id}:{key}:day_off")] if work else []),
+                ("Вернуть обычный график", f"sched:{id}:{key}:reset"),
+                ("Другие настройки дня", f"dayextra:{id}:{key}"),
                 HOME,
             ),
         )
@@ -297,6 +283,54 @@ async def render_day(event, app, actor, id, key):
 async def day(callback, app, actor):
     _, id, key = callback.data.split(":")
     await render_day(callback, app, actor, id, key)
+
+
+@router.callback_query(F.data.startswith("intervalmenu:"))
+async def interval_menu(callback, app, actor):
+    _, id, key = callback.data.split(":")
+    selected = date.fromisoformat(key)
+    work, *_ = await app.schedule(actor, id, selected)
+    await send(
+        callback,
+        f"Рабочее время на {selected:%d.%m.%Y}: {render_intervals(work)}. "
+        "Можно задать несколько интервалов, например 10:00–13:00 и 15:00–20:00.",
+        one(
+            ("Выбрать время кнопками", f"intervalbuttons:{id}:{key}:intervals"),
+            ("Ввести интервалы вручную", f"intervaltext:{id}:{key}"),
+            ("К дате", f"dayrule:{id}:{key}"),
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("intervaltext:"))
+async def interval_text(callback, state: FSMContext, app, actor):
+    _, id, key = callback.data.split(":")
+    date.fromisoformat(key)
+    await app.owned_business(actor, id)
+    await manual_schedule_form(callback, state, id, key, "intervals")
+
+
+@router.callback_query(F.data.startswith("dayextra:"))
+async def day_extra(callback, app, actor):
+    _, id, key = callback.data.split(":")
+    selected = date.fromisoformat(key)
+    _, closed, _, _, _ = await app.schedule(actor, id, selected)
+    await send(
+        callback,
+        f"Другие настройки на {selected:%d.%m.%Y}",
+        one(
+            ("Комментарий дня", f"sched:{id}:{key}:comment"),
+            ("Адрес этой даты", f"sched:{id}:{key}:address"),
+            ("Комментарий / адрес конкретного времени", f"timenote:{id}:{key}"),
+            *([("Убрать прежние разовые закрытия", f"sched:{id}:{key}:clear_closed")]
+              if closed else []),
+            ("Записать клиента вручную", f"manual:{id}:{key}"),
+            ("Открыть записи этой даты", f"dayapps:{id}:{key}"),
+            (f"Изменить обычный график: {DAYS[selected.weekday()]}",
+             f"dayrule:{id}:w{selected.weekday()}"),
+            ("К дате", f"dayrule:{id}:{key}"),
+        ),
+    )
 
 
 @router.callback_query(F.data.startswith("daylimit:"))

@@ -12,6 +12,9 @@ from notebook_bot.bot.schedule import (
     apply_bulk_week_intervals,
     choose_weekdays,
     day_limit,
+    day_extra,
+    interval_menu,
+    render_day,
     select_weekdays,
     set_day_limit,
     start_interval_form,
@@ -88,6 +91,21 @@ async def test_coloured_calendar_and_interval_buttons(tmp_path):
     await open_calendar(event, app, owner.id)
     calendar_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
     assert any(button.callback_data == f"dayrule:{business.id}:{day.isoformat()}" for button in calendar_buttons)
+
+    await render_day(event, app, owner.id, business.id, day.isoformat())
+    day_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
+    assert any(button.text == "Изменить рабочее время" for button in day_buttons)
+    assert not any("Закрыть часть дня" in button.text for button in day_buttons)
+    event.data = f"intervalmenu:{business.id}:{day.isoformat()}"
+    await interval_menu(event, app, owner.id)
+    interval_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
+    assert {"Выбрать время кнопками", "Ввести интервалы вручную"} <= {
+        button.text for button in interval_buttons
+    }
+    event.data = f"dayextra:{business.id}:{day.isoformat()}"
+    await day_extra(event, app, owner.id)
+    extra_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
+    assert any(button.text == "Открыть записи этой даты" for button in extra_buttons)
 
     event.data = f"daylimit:{business.id}:{day.isoformat()}"
     await day_limit(event, app, owner.id)
