@@ -11,10 +11,11 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 
-from .bot import business, calendar, menu, schedule, services
+from .bot import appointments, booking, business, calendar, menu, schedule, services
 from .bot.common import ContextMiddleware, HOME, forms_router, one, send
+from .bot.notifications import worker
 from .config import Settings
-from .logic.catalog import Catalog
+from .logic.booking import BookingService
 from .storage import MemoryRepository
 
 
@@ -28,12 +29,12 @@ class RedactSecrets(logging.Formatter):
 def process_lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as file:
-        file.seek(0)
-        if not file.read(1):
-            file.write(b"0")
-            file.flush()
-        file.seek(0)
         try:
+            file.seek(0)
+            if not file.read(1):
+                file.write(b"0")
+                file.flush()
+            file.seek(0)
             if sys.platform == "win32":
                 import msvcrt
 
@@ -56,17 +57,13 @@ def process_lock(path: Path):
                 fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
 
-def build_app(settings: Settings) -> Catalog:
-
-
+def build_app(settings: Settings) -> BookingService:
     data_file = settings.data_file if settings.storage == "json" else None
     repository = MemoryRepository(data_file)
-    return Catalog(repository, settings.timezone)
+    return BookingService(repository, settings.timezone)
 
 
-def build_dispatcher(app: Catalog) -> Dispatcher:
-    
-
+def build_dispatcher(app: BookingService) -> Dispatcher:
     dispatcher = Dispatcher(storage=MemoryStorage(), events_isolation=SimpleEventIsolation())
     middleware = ContextMiddleware(app)
     dispatcher.message.outer_middleware(middleware)
@@ -78,6 +75,8 @@ def build_dispatcher(app: Catalog) -> Dispatcher:
     dispatcher.include_router(services.router)
     dispatcher.include_router(schedule.router)
     dispatcher.include_router(calendar.router)
+    dispatcher.include_router(booking.router)
+    dispatcher.include_router(appointments.router)
     dispatcher.include_router(forms_router)
 
     fallback = Router(name="future_sections")
@@ -140,6 +139,7 @@ async def main():
                     "У бота установлен webhook. Для polling сначала отключите прежний запуск."
                 )
             logging.info("Notebook запущен как @%s", info.username)
+            task = asyncio.create_task(worker(bot, app))
             try:
                 await dispatcher.start_polling(
                     bot,
@@ -147,6 +147,9 @@ async def main():
                     close_bot_session=False,
                 )
             finally:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
                 await dispatcher.storage.close()
 
 

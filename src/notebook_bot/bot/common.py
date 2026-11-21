@@ -14,7 +14,10 @@ SUBMITS = {}
 def kb(*rows):
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=label, callback_data=data) for label, data in row]
+            [
+                InlineKeyboardButton(text=button[0], callback_data=button[1], style=button[2] if len(button) > 2 else None)
+                for button in row
+            ]
             for row in rows
         ]
     )
@@ -118,6 +121,8 @@ async def input_form(message, state: FSMContext, app, actor):
             value = minute(raw)
             if value == 1440:
                 raise RuleError("Для начала выберите время до 24:00.")
+        elif parser == "end_time":
+            value = minute(raw)
         elif parser == "optional":
             value = "" if raw == "-" else text(raw, 1000)
         else:
