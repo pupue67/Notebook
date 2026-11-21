@@ -23,7 +23,7 @@ async def week(callback, app, actor):
     rules = {r.weekday: r for r in await app.schedule(actor, id)}
     await send(
         callback,
-        "Рабочая неделя\nИзменения здесь относятся к выбранному дню недели.\n\n"
+        "Рабочая неделя\nЭтот график повторяется каждую неделю, если для конкретной даты не заданы другие настройки.\n\n"
         + "\n".join(
             f"{name}: {render_intervals(rules[i].intervals) if i in rules and rules[i].intervals else 'Выходной'}"
             for i, name in enumerate(DAYS)
@@ -242,7 +242,7 @@ async def render_day(event, app, actor, id, key):
             raise RuleError("Неизвестный день недели.")
         rules = await app.schedule(actor, id)
         rule = next((r for r in rules if r.weekday == weekday), None)
-        description = f"{DAYS[weekday]} — обычный график\n\n{render_intervals(rule.intervals if rule else [])}\nЛимит: {rule.limit if rule and rule.limit is not None else 'без лимита'}\nКомментарий: {rule.comment if rule else '—'}"
+        description = f"{DAYS[weekday]} — график на каждую неделю\n\n{render_intervals(rule.intervals if rule else [])}\nЛимит: {rule.limit if rule and rule.limit is not None else 'без лимита'}\nКомментарий: {rule.comment if rule else '—'}"
         buttons = [
             ("Изменить рабочие интервалы", "intervals"),
             ("Изменить лимит", "limit"),
@@ -263,7 +263,17 @@ async def render_day(event, app, actor, id, key):
         work, closed, limit, rule, override = await app.schedule(actor, id, day)
         appointments = await app.appointments(actor, id, day)
         count = sum(a.status in ("booked", "pending_payment", "awaiting_duration") for a in appointments)
-        description = f"{DAYS[day.weekday()]}, {day:%d.%m.%Y}\nСтатус: {'рабочий день' if work else 'выходной'}\n\nРабочие интервалы: {render_intervals(work)}\nЗакрыто: {render_intervals(closed) if closed else 'нет'}\nЗаписей: {count} / {limit if limit is not None else 'без лимита'}\nКомментарий недели: {rule.comment if rule else '—'}\nКомментарий даты: {override.comment if override else '—'}"
+        description = (
+            f"{DAYS[day.weekday()]}, {day:%d.%m.%Y}\n"
+            f"Статус: {'рабочий день' if work else 'выходной'}\n\n"
+            f"График недели: {render_intervals(rule.intervals) if rule and rule.intervals else 'Выходной'}\n"
+            f"Для этой даты: {render_intervals(work) if work else 'Выходной'}\n"
+            f"Записей: {count} / {limit if limit is not None else 'без лимита'}\n"
+            f"Комментарий недели: {rule.comment if rule else '—'}\n"
+            f"Комментарий даты: {override.comment if override else '—'}"
+        )
+        if closed:
+            description += f"\nПрежние разовые закрытия: {render_intervals(closed)}"
         await send(
             event,
             description,
@@ -272,7 +282,9 @@ async def render_day(event, app, actor, id, key):
                 (f"Лимит записей: {limit if limit is not None else 'без лимита'}",
                  f"daylimit:{id}:{key}"),
                 *([("Сделать день выходным", f"sched:{id}:{key}:day_off")] if work else []),
-                ("Вернуть обычный график", f"sched:{id}:{key}:reset"),
+                *([("Сбросить настройки этой даты", f"confirmreset:{id}:{key}")]
+                  if override else []),
+                ("Посмотреть график недели", f"week:{id}"),
                 ("Другие настройки дня", f"dayextra:{id}:{key}"),
                 HOME,
             ),
@@ -326,9 +338,25 @@ async def day_extra(callback, app, actor):
               if closed else []),
             ("Записать клиента вручную", f"manual:{id}:{key}"),
             ("Открыть записи этой даты", f"dayapps:{id}:{key}"),
-            (f"Изменить обычный график: {DAYS[selected.weekday()]}",
+            (f"Изменить график каждой недели: {DAYS[selected.weekday()]}",
              f"dayrule:{id}:w{selected.weekday()}"),
             ("К дате", f"dayrule:{id}:{key}"),
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("confirmreset:"))
+async def confirm_date_reset(callback, app, actor):
+    _, id, key = callback.data.split(":")
+    selected = date.fromisoformat(key)
+    await app.schedule(actor, id, selected)
+    await send(
+        callback,
+        f"Сбросить настройки {selected:%d.%m.%Y}? Удалятся рабочее время, лимит, "
+        "комментарий и адрес, заданные только для этой даты. Затем снова будет действовать график недели.",
+        one(
+            ("Да, сбросить настройки даты", f"sched:{id}:{key}:reset", "danger"),
+            ("Оставить как есть", f"dayrule:{id}:{key}"),
         ),
     )
 

@@ -11,6 +11,7 @@ from notebook_bot.bot.schedule import (
     save_bulk_week_intervals,
     apply_bulk_week_intervals,
     choose_weekdays,
+    confirm_date_reset,
     day_limit,
     day_extra,
     interval_menu,
@@ -93,8 +94,10 @@ async def test_coloured_calendar_and_interval_buttons(tmp_path):
     assert any(button.callback_data == f"dayrule:{business.id}:{day.isoformat()}" for button in calendar_buttons)
 
     await render_day(event, app, owner.id, business.id, day.isoformat())
+    assert "График недели: 10:00–11:00, 12:00–13:00" in event.messages[-1][0]
     day_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
     assert any(button.text == "Изменить рабочее время" for button in day_buttons)
+    assert any(button.text == "Посмотреть график недели" for button in day_buttons)
     assert not any("Закрыть часть дня" in button.text for button in day_buttons)
     event.data = f"intervalmenu:{business.id}:{day.isoformat()}"
     await interval_menu(event, app, owner.id)
@@ -114,6 +117,12 @@ async def test_coloured_calendar_and_interval_buttons(tmp_path):
     event.data = f"setdaylimit:{business.id}:{day.isoformat()}:4"
     await set_day_limit(event, app, owner.id)
     assert (await app.schedule(owner.id, business.id, day))[2] == 4
+    await render_day(event, app, owner.id, business.id, day.isoformat())
+    reset_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
+    assert any(button.text == "Сбросить настройки этой даты" for button in reset_buttons)
+    event.data = f"confirmreset:{business.id}:{day.isoformat()}"
+    await confirm_date_reset(event, app, owner.id)
+    assert "Затем снова будет действовать график недели" in event.messages[-1][0]
 
     await show_master_month(event, app, owner.id, business.id, 2027, 1)
     january_buttons = [button for row in event.messages[-1][1].inline_keyboard for button in row]
