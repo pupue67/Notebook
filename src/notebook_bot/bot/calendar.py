@@ -65,9 +65,9 @@ async def show_master_month(event, app, actor, business_id, year, month):
     previous = shift_month(year, month, -1)
     following = shift_month(year, month, 1)
     if previous >= (today.year, today.month):
-        nav.append(("◀", f"mastermonth:{business_id}:{previous[0]}:{previous[1]}"))
+        nav.append(("Предыдущий месяц", f"mastermonth:{business_id}:{previous[0]}:{previous[1]}"))
     if date(*following, 1) <= last:
-        nav.append(("▶", f"mastermonth:{business_id}:{following[0]}:{following[1]}"))
+        nav.append(("Следующий месяц", f"mastermonth:{business_id}:{following[0]}:{following[1]}"))
     if nav:
         rows.append(nav)
     rows.append([("Выбрать диапазон рабочих дней", f"weekselect:{business_id}")])
@@ -100,8 +100,8 @@ async def show_month(event, app, actor, business_id, year, month):
     for day_number in range(1, monthrange(year, month)[1] + 1):
         day = date(year, month, day_number)
         if today <= day <= last_allowed:
-            mark = " ✓" if business.booking_until == day else ""
-            cells.append((f"{day_number}{mark}", f"hend:{business_id}:{day.isoformat()}"))
+            style = "primary" if business.booking_until == day else None
+            cells.append((str(day_number), f"hend:{business_id}:{day.isoformat()}", style))
         else:
             cells.append(("·", "hnoop"))
     cells.extend([(" ", "hnoop")] * (-len(cells) % 7))
@@ -110,9 +110,9 @@ async def show_month(event, app, actor, business_id, year, month):
     previous = shift_month(year, month, -1)
     following = shift_month(year, month, 1)
     if previous >= (today.year, today.month):
-        navigation.append(("◀", f"hmonth:{business_id}:{previous[0]}:{previous[1]}"))
+        navigation.append(("Предыдущий месяц", f"hmonth:{business_id}:{previous[0]}:{previous[1]}"))
     if date(*following, 1) <= last_allowed:
-        navigation.append(("▶", f"hmonth:{business_id}:{following[0]}:{following[1]}"))
+        navigation.append(("Следующий месяц", f"hmonth:{business_id}:{following[0]}:{following[1]}"))
     if navigation:
         rows.append(navigation)
     rows.append([("Убрать конечную дату", f"hclear:{business_id}")])

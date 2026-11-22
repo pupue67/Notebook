@@ -17,7 +17,7 @@ async def services(callback, app, actor):
         callback,
         "Услуги",
         one(
-            *[(f"{'✓' if s.active else '○'} {s.name}", f"service:{s.id}") for s in items],
+            *[(f"{s.name} ({'активна' if s.active else 'скрыта'})", f"service:{s.id}") for s in items],
             ("Добавить услугу", f"serviceadd:{id}"),
             ("Мой бизнес", f"nav:business:{id}"),
             HOME,

@@ -70,9 +70,9 @@ async def list_page(event, state, app, actor, business_id=None, day=None, page=0
         (f"{a.start:%d.%m %H:%M} · {a.service_name} · {STATUSES[a.status]}", f"appt:{a.id}") for a in subset
     ]
     if page:
-        buttons.append(("◀ Назад", f"appspage:{page - 1}"))
+        buttons.append(("Назад", f"appspage:{page - 1}"))
     if (page + 1) * 12 < len(items):
-        buttons.append(("Далее ▶", f"appspage:{page + 1}"))
+        buttons.append(("Далее", f"appspage:{page + 1}"))
     await send(event, "Записи" if items else "Пока нет записей.", one(*buttons, HOME))
 
 
@@ -288,9 +288,9 @@ async def show_manual_calendar(event, state, app, actor):
         last = min(last, business.booking_until)
     navigation = []
     if page:
-        navigation.append(("◀", f"manualpick:{nonce}:page:{page - 1}"))
+        navigation.append(("Назад", f"manualpick:{nonce}:page:{page - 1}"))
     if date(*shift_month(year, month, 1), 1) <= last:
-        navigation.append(("▶", f"manualpick:{nonce}:page:{page + 1}"))
+        navigation.append(("Далее", f"manualpick:{nonce}:page:{page + 1}"))
     if navigation:
         rows.append(navigation)
     rows.append([HOME])
@@ -315,9 +315,9 @@ async def show_manual_times(event, state, app, actor):
     rows = [items[index:index + 3] for index in range(0, len(items), 3)]
     navigation = []
     if page:
-        navigation.append(("◀", f"manualpick:{nonce}:times:{page - 1}"))
+        navigation.append(("Назад", f"manualpick:{nonce}:times:{page - 1}"))
     if (page + 1) * 24 < len(slots):
-        navigation.append(("▶", f"manualpick:{nonce}:times:{page + 1}"))
+        navigation.append(("Далее", f"manualpick:{nonce}:times:{page + 1}"))
     if navigation:
         rows.append(navigation)
     rows.append([("Посмотреть записи этой даты", f"dayapps:{selection['business_id']}:{day.isoformat()}")])

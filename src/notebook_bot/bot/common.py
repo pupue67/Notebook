@@ -27,7 +27,7 @@ def one(*buttons):
     return kb(*[[button] for button in buttons])
 
 
-HOME = ("⌂ Главное меню", "home")
+HOME = ("Главное меню", "home")
 
 
 async def send(event, text_value, markup=None):

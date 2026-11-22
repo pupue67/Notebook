@@ -66,9 +66,9 @@ async def render_choices(event, state, app, actor):
         max_page = (last.year - today.year) * 12 + last.month - today.month
         nav = []
         if page:
-            nav.append(("◀", f"pick:{nonce}:page:{page - 1}"))
+            nav.append(("Назад", f"pick:{nonce}:page:{page - 1}"))
         if page < max_page:
-            nav.append(("▶", f"pick:{nonce}:page:{page + 1}"))
+            nav.append(("Далее", f"pick:{nonce}:page:{page + 1}"))
         if nav:
             rows.append(nav)
     else:
@@ -83,9 +83,9 @@ async def render_choices(event, state, app, actor):
         rows = [items[index:index + 3] for index in range(0, len(items), 3)]
         nav = []
         if page:
-            nav.append(("◀", f"pick:{nonce}:page:{page - 1}"))
+            nav.append(("Назад", f"pick:{nonce}:page:{page - 1}"))
         if (page + 1) * size < len(choices):
-            nav.append(("▶", f"pick:{nonce}:page:{page + 1}"))
+            nav.append(("Далее", f"pick:{nonce}:page:{page + 1}"))
         if nav:
             rows.append(nav)
     if view == "times":
