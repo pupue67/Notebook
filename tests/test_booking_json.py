@@ -13,6 +13,51 @@ from notebook_bot.models import Appointment, History, Interval, Notification
 
 
 @pytest.mark.asyncio
+async def test_delete_service_keeps_visits_and_business_requires_handling_them(tmp_path):
+    timezone = ZoneInfo("Asia/Yekaterinburg")
+    now = datetime(2026, 11, 20, 9, tzinfo=timezone)
+    settings = Settings("test:token", "json", tmp_path / "notebook.json", timezone)
+    app = build_app(settings)
+    app.clock = lambda: now
+    owner = await app.user(101, "Мастер")
+    client = await app.user(102, "Клиент")
+    source = await app.create_business(owner.id, "Студия 1", "Мастер", "Услуги", "at_master", "Адрес", "")
+    target = await app.create_business(owner.id, "Студия 2", "Мастер", "Услуги", "at_master", "Адрес", "")
+    old = await app.save_service(owner.id, source.id, "Стрижка", 1000, "fixed", 60)
+    new = await app.save_service(owner.id, target.id, "Укладка", 800, "fixed", 45)
+    start = datetime(2026, 11, 23, 10, tzinfo=timezone)
+    for business in (source, target):
+        await app.edit_schedule(owner.id, business.id, start.weekday(), "intervals", [Interval(start=600, end=780)])
+    visit = await app.create(client.id, old.id, start)
+    cancelled_later = await app.create(client.id, old.id, start + timedelta(hours=1))
+    with pytest.raises(RuleError):
+        await app.delete_service(client.id, old.id, keep_visits=True)
+    with pytest.raises(RuleError, match="действующие записи"):
+        await app.delete_service(owner.id, old.id)
+    await app.delete_service(owner.id, old.id, keep_visits=True)
+    assert await app.services(source.id, owner.id) == []
+    with pytest.raises(RuleError, match="недоступно"):
+        await app.create(client.id, old.id, start + timedelta(hours=2))
+    preserved, *_ = await app.get_appointment(client.id, visit.id)
+    assert preserved.status == "booked"
+    with pytest.raises(RuleError, match="действующие записи"):
+        await app.delete_business(owner.id, source.id)
+
+    await app.transfer_service(owner.id, visit.id, new.id, start, visit.revision)
+    await app.cancel(owner.id, cancelled_later.id, cancelled_later.revision)
+    await app.delete_business(owner.id, source.id)
+    reopened = build_app(settings)
+    with pytest.raises(RuleError):
+        await reopened.business(source.id)
+    moved, business, _, *_ = await reopened.get_appointment(client.id, visit.id)
+    assert (business.id, moved.service_id, moved.duration_min) == (target.id, new.id, 45)
+    async with reopened.repo.transaction() as tx:
+        assert await tx.list(Appointment, business_id=source.id) == []
+        assert await tx.list(History, appointment_id=cancelled_later.id) == []
+        assert any("Запись отменена" in n.text for n in await tx.list(Notification, appointment_id=None))
+
+
+@pytest.mark.asyncio
 async def test_client_booking_survives_restart_and_releases_slot(tmp_path):
     timezone = ZoneInfo("Asia/Yekaterinburg")
     now = datetime(2026, 11, 20, 9, 0, tzinfo=timezone)

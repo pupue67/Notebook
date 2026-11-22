@@ -11,7 +11,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 
-from .bot import appointments, booking, business, calendar, menu, schedule, services
+from .bot import appointments, booking, business, calendar, deletion, menu, schedule, services
 from .bot.common import ContextMiddleware, HOME, forms_router, one, send
 from .bot.notifications import worker
 from .config import Settings
@@ -77,6 +77,7 @@ def build_dispatcher(app: BookingService) -> Dispatcher:
     dispatcher.include_router(calendar.router)
     dispatcher.include_router(booking.router)
     dispatcher.include_router(appointments.router)
+    dispatcher.include_router(deletion.router)
     dispatcher.include_router(forms_router)
 
     fallback = Router(name="future_sections")

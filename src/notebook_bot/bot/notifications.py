@@ -20,6 +20,9 @@ async def deliver(bot, app):
         ][:30]
     for n in pending:
         async with app.repo.transaction() as tx:
+            n = await tx.get(Notification, n.id)
+            if not n:
+                continue
             user = await tx.get(User, n.user_id)
             a = await tx.get(Appointment, n.appointment_id) if n.appointment_id else None
             message = n.text
@@ -60,6 +63,8 @@ async def deliver(bot, app):
             log.warning("Notification %s delivery failed; retry scheduled", n.id)
         async with app.repo.transaction() as tx:
             current = await tx.get(Notification, n.id)
+            if not current:
+                continue
             current.sent = n.sent
             current.attempts = 10 if permanent else current.attempts + 1
             current.next_attempt = app.clock() + timedelta(seconds=delay)

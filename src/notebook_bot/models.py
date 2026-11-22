@@ -47,6 +47,7 @@ class Service(Entity):
     mode: Literal["fixed", "personal"] = "fixed"
     duration_min: int = 60
     active: bool = True
+    deleted: bool = False
     prepay_rub: int = 0
 
 

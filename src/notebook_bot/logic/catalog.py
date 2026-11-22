@@ -11,7 +11,9 @@ from ..models import (
     DateOverride,
     DayRule,
     Favorite,
+    History,
     Notification,
+    PersonalDuration,
     Service,
     TimeNote,
     User,
@@ -131,6 +133,51 @@ class Catalog:
             await transaction.put(business)
             return business
 
+    async def delete_business(self, actor, business_id):
+        async with self.repo.transaction() as tx:
+            business = await self.owner(tx, actor, business_id)
+            appointments = await tx.list(Appointment, business_id=business_id)
+            now = self.clock()
+            if any(occupies(a, now) and a.start + timedelta(minutes=a.duration_min) > now
+                   for a in appointments):
+                raise RuleError("Перед удалением бизнеса отмените действующие записи или перенесите их.")
+            for appointment in appointments:
+                for item in await tx.list(History, appointment_id=appointment.id):
+                    await tx.delete(History, item.id)
+                for item in await tx.list(Notification, appointment_id=appointment.id):
+                    if (not item.sent and item.attempts < 10 and appointment.status.startswith("cancelled")
+                            and item.text.startswith("Запись отменена.")):
+                        # Deleting the business must not discard a cancellation still awaiting delivery.
+                        item.appointment_id = None
+                        item.text += f"\n{business.name}, {appointment.start:%d.%m.%Y %H:%M}"
+                        await tx.put(item)
+                    else:
+                        await tx.delete(Notification, item.id)
+                await tx.delete(Appointment, appointment.id)
+            for service in await tx.list(Service, business_id=business_id):
+                for item in await tx.list(PersonalDuration, service_id=service.id):
+                    await tx.delete(PersonalDuration, item.id)
+                await tx.delete(Service, service.id)
+            for model in (DayRule, DateOverride, TimeNote, Client, Favorite):
+                for item in await tx.list(model, business_id=business_id):
+                    await tx.delete(model, item.id)
+            await tx.delete(Business, business.id)
+
+    async def deletion_appointments(self, actor, kind, id):
+        async with self.repo.transaction() as tx:
+            if kind == "business":
+                await self.owner(tx, actor, id)
+                records = await tx.list(Appointment, business_id=id)
+            else:
+                await self._owned_service(tx, actor, id)
+                records = await tx.list(Appointment, service_id=id)
+            now = self.clock()
+            return sorted(
+                (a for a in records if occupies(a, now)
+                 and a.start + timedelta(minutes=a.duration_min) > now),
+                key=lambda a: a.start,
+            )
+
     async def services(self, business_id, actor=None):
         async with self.repo.transaction() as transaction:
             business = await transaction.get(Business, business_id)
@@ -140,7 +187,7 @@ class Catalog:
             return [
                 service
                 for service in services
-                if service.active or business.owner_id == actor
+                if not service.deleted and (service.active or business.owner_id == actor)
             ]
 
     async def favorites(self, actor):
@@ -174,13 +221,42 @@ class Catalog:
                 raise RuleError("Услуга не найдена.")
             return s
 
+    async def _owned_service(self, tx, actor, id):
+        service = await tx.get(Service, id)
+        if not service or service.deleted:
+            raise RuleError("Услуга не найдена.")
+        await self.owner(tx, actor, service.business_id)
+        return service
+
+    async def owned_service(self, actor, id):
+        async with self.repo.transaction() as tx:
+            return await self._owned_service(tx, actor, id)
+
+    async def delete_service(self, actor, id, *, keep_visits=False):
+        async with self.repo.transaction() as tx:
+            service = await self._owned_service(tx, actor, id)
+            records = await tx.list(Appointment, service_id=id)
+            now = self.clock()
+            if not keep_visits and any(occupies(a, now) and a.start + timedelta(minutes=a.duration_min) > now
+                   for a in records):
+                raise RuleError("Сначала обработайте действующие записи на эту услугу.")
+            if records:
+                service.active = False
+                service.deleted = True
+                await tx.put(service)
+            else:
+                for item in await tx.list(PersonalDuration, service_id=id):
+                    await tx.delete(PersonalDuration, item.id)
+                await tx.delete(Service, id)
+            return service
+
     async def save_service(self, actor, business_id, name, price, mode, duration, prepay=0, id=None):
         async with self.repo.transaction() as tx:
             b = await self.owner(tx, actor, business_id)
             if mode not in ("fixed", "personal"):
                 raise RuleError("Выберите режим длительности.")
             s = await tx.get(Service, id) if id else Service(business_id=business_id, name=name)
-            if not s or s.business_id != business_id:
+            if not s or s.deleted or s.business_id != business_id:
                 raise RuleError("Услуга недоступна.")
             s.name, s.price_rub = text(name, 100), number(price)
             s.mode, s.duration_min = mode, number(duration, 1, 1440)
@@ -192,10 +268,7 @@ class Catalog:
 
     async def toggle_service(self, actor, id):
         async with self.repo.transaction() as tx:
-            s = await tx.get(Service, id)
-            if not s:
-                raise RuleError("Услуга не найдена.")
-            await self.owner(tx, actor, s.business_id)
+            s = await self._owned_service(tx, actor, id)
             s.active = not s.active
             await tx.put(s)
 

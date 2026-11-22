@@ -27,15 +27,14 @@ async def services(callback, app, actor):
 
 @router.callback_query(F.data.startswith("service:"))
 async def service(callback, app, actor):
-    s = await app.service(callback.data.split(":")[1])
-    async with app.repo.transaction() as tx:
-        await app.owner(tx, actor, s.business_id)
+    s = await app.owned_service(actor, callback.data.split(":")[1])
     await send(
         callback,
         f"{s.name}\n{s.price_rub} ₽\nРежим: {'фиксированная' if s.mode == 'fixed' else 'персональная'} длительность\nБазовое время: {s.duration_min} мин\nПредоплата: {s.prepay_rub} ₽\n{'Активна' if s.active else 'Скрыта'}",
         one(
             ("Редактировать", f"serviceedit:{s.id}"),
             ("Скрыть / активировать", f"servicehide:{s.id}"),
+            ("Удалить услугу", f"servicedeleteask:{s.id}"),
             ("Услуги", f"services:{s.business_id}"),
             HOME,
         ),
@@ -51,11 +50,11 @@ async def hide(callback, app, actor):
 
 @router.callback_query(F.data.startswith("serviceadd:"))
 @router.callback_query(F.data.startswith("serviceedit:"))
-async def edit(callback, state: FSMContext, app):
+async def edit(callback, state: FSMContext, app, actor):
     action, id = callback.data.split(":")
     context = {"business_id": id}
     if action == "serviceedit":
-        s = await app.service(id)
+        s = await app.owned_service(actor, id)
         context = {"business_id": s.business_id, "id": s.id}
     await start_form(
         callback,

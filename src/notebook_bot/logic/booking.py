@@ -7,6 +7,62 @@ from .rules import RuleError, number
 
 
 class BookingService(Catalog):
+    async def _service_transfer(self, tx, actor, appointment_id, service_id):
+        appointment, source, client = await self._access(tx, actor, appointment_id)
+        await self.owner(tx, actor, source.id)
+        now = self.clock()
+        if not occupies(appointment, now) or appointment.start <= now:
+            raise RuleError("Сменить услугу можно только у предстоящей записи.")
+        service = await self._owned_service(tx, actor, service_id)
+        if not service.active or service.id == appointment.service_id:
+            raise RuleError("Выберите другую активную услугу.")
+        business = await self.owner(tx, actor, service.business_id)
+        if service.prepay_rub != appointment.prepay_rub or (
+            source.id != business.id and appointment.prepay_rub
+        ):
+            raise RuleError("Для этой записи требуется отдельно согласовать предоплату.")
+        target_client_id = client.id if source.id == business.id else None
+        if not target_client_id and client.user_id:
+            clients = await tx.list(Client, business_id=business.id, user_id=client.user_id)
+            target_client_id = clients[0].id if clients else None
+        duration, known = await duration_for(tx, service, target_client_id)
+        if not known:
+            duration = appointment.duration_min
+        times = await available_times(tx, business, service, target_client_id, appointment.start.date(),
+                                      now, exclude=appointment.id, duration=duration)
+        return appointment, client, service, business, duration, times
+
+    async def service_transfer_times(self, actor, appointment_id, service_id):
+        async with self.repo.transaction() as tx:
+            _, _, service, business, duration, times = await self._service_transfer(
+                tx, actor, appointment_id, service_id
+            )
+            return service, business, duration, times
+
+    async def transfer_service(self, actor, appointment_id, service_id, start, revision):
+        async with self.repo.transaction() as tx:
+            a, client, service, business, duration, times = await self._service_transfer(
+                tx, actor, appointment_id, service_id
+            )
+            if a.revision != revision or start not in times:
+                raise RuleError("Выбранное время устарело. Откройте список свободных слотов заново.")
+            old_start, old_service = a.start, a.service_name
+            if a.business_id != business.id:
+                client = await self.client(tx, business.id, user_id=client.user_id, name=client.name)
+            a.business_id, a.client_id, a.service_id = business.id, client.id, service.id
+            a.service_name, a.price_rub, a.buffer_min = service.name, service.price_rub, business.buffer_min
+            a.start, a.duration_min = start, duration
+            a.required_duration, a.save_personal_on_move, a.move_requested = None, False, False
+            a.reminders_sent = []
+            if a.status == "awaiting_duration":
+                a.status = "pending_payment" if a.prepay_rub else "booked"
+                a.expires_at = self.clock() + timedelta(minutes=30) if a.prepay_rub else None
+            a.revision += 1
+            await tx.put(a)
+            await self._history(tx, a, actor, "change_service", old_start, reason=old_service)
+            await self.notify(tx, a, f"Мастер изменил услугу: {service.name}")
+            return a
+
     async def _access(self, tx, actor, id):
         a = await tx.get(Appointment, id)
         if not a:

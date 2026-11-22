@@ -172,6 +172,7 @@ async def settings(callback, app, actor):
             *[(label, f"setting:{id}:{key}") for key, label in FIELDS.items()],
             ("Выбрать последнюю дату на календаре", f"horizon:{id}"),
             ("Расширенные настройки", f"advanced:{id}"),
+            ("Удалить бизнес", f"businessdeleteask:{id}"),
             HOME,
         ),
     )
