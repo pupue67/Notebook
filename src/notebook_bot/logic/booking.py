@@ -154,6 +154,24 @@ class BookingService(Catalog):
             )
             return a
 
+    async def set_appointment_price(self, actor, id, price, expected_revision):
+        async with self.repo.transaction() as tx:
+            appointment, business, _ = await self._access(tx, actor, id)
+            await self.owner(tx, actor, business.id)
+            if appointment.revision != expected_revision:
+                raise RuleError("Карточка устарела. Откройте запись заново.")
+            if not occupies(appointment, self.clock()):
+                raise RuleError("Цену можно изменить только у действующей записи.")
+            new_price = number(price, appointment.prepay_rub)
+            old_price = appointment.price_rub
+            if new_price != old_price:
+                appointment.price_rub = new_price
+                appointment.revision += 1
+                await tx.put(appointment)
+                await self._history(tx, appointment, actor, "price", reason=f"{old_price} → {new_price}")
+                await self.notify(tx, appointment, f"Стоимость визита изменена: {old_price} ₽ → {new_price} ₽.")
+            return appointment
+
     async def set_duration(self, actor, id, minutes, future=False, expected_revision=None):
         minutes = number(minutes, 1, 1440)
         async with self.repo.transaction() as tx:

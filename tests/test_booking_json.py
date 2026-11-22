@@ -34,6 +34,41 @@ async def test_short_business_code_is_unique_and_persists_for_legacy_profiles(tm
 
 
 @pytest.mark.asyncio
+async def test_appointment_price_changes_only_selected_visit(tmp_path):
+    timezone = ZoneInfo("Asia/Yekaterinburg")
+    now = datetime(2026, 11, 20, 9, tzinfo=timezone)
+    settings = Settings("test:token", "json", tmp_path / "notebook.json", timezone)
+    app = build_app(settings)
+    app.clock = lambda: now
+    owner = await app.user(101, "Мастер")
+    client = await app.user(102, "Клиент")
+    business = await app.create_business(owner.id, "Студия", "Мастер", "Услуги", "at_master", "Адрес", "")
+    await app.update_business(owner.id, business.id, "payment_details", "Тестовые реквизиты")
+    service = await app.save_service(owner.id, business.id, "Педикюр", 1500, "fixed", 60, prepay=300)
+    start = datetime(2026, 11, 23, 10, tzinfo=timezone)
+    await app.edit_schedule(owner.id, business.id, start.weekday(), "intervals", [Interval(start=600, end=780)])
+    first = await app.create(client.id, service.id, start)
+    second = await app.create(client.id, service.id, start + timedelta(hours=1))
+
+    with pytest.raises(RuleError):
+        await app.set_appointment_price(client.id, first.id, 1800, first.revision)
+    with pytest.raises(RuleError):
+        await app.set_appointment_price(owner.id, first.id, 200, first.revision)
+    await app.set_appointment_price(owner.id, first.id, 1800, first.revision)
+    with pytest.raises(RuleError, match="устарела"):
+        await app.set_appointment_price(owner.id, first.id, 2000, first.revision)
+
+    reopened = build_app(settings)
+    updated, *_ = await reopened.get_appointment(client.id, first.id)
+    other, *_ = await reopened.get_appointment(client.id, second.id)
+    assert (updated.price_rub, updated.prepay_rub, updated.status) == (1800, 300, "pending_payment")
+    assert other.price_rub == (await reopened.service(service.id)).price_rub == 1500
+    async with reopened.repo.transaction() as tx:
+        assert any(n.user_id == client.id and "1800" in n.text
+                   for n in await tx.list(Notification, appointment_id=first.id))
+
+
+@pytest.mark.asyncio
 async def test_delete_service_keeps_visits_and_business_requires_handling_them(tmp_path):
     timezone = ZoneInfo("Asia/Yekaterinburg")
     now = datetime(2026, 11, 20, 9, tzinfo=timezone)

@@ -32,6 +32,8 @@ async def show_appointment(event, app, actor, id):
         message += "\nМастер просит выбрать другую дату и время."
     buttons = []
     if a.status in ("booked", "pending_payment", "awaiting_duration"):
+        if owner and occupies(a, app.clock()):
+            buttons.append(("Изменить цену визита", f"apptprice:{a.id}"))
         if a.start > app.clock():
             if owner and c.user_id and c.user_id != actor:
                 buttons.append(("Попросить клиента выбрать новое время", f"requestmove:{a.id}"))
@@ -139,6 +141,25 @@ async def move(callback, state: FSMContext, app, actor):
     await state.clear()
     await state.update_data(service_id=a.service_id, appointment_id=a.id, revision=a.revision)
     await dates(callback, state, app, actor)
+
+
+@router.callback_query(F.data.startswith("apptprice:"))
+async def set_price(callback, state: FSMContext, app, actor):
+    appointment, business, *_ = await app.get_appointment(actor, callback.data.split(":")[1])
+    if business.owner_id != actor or not occupies(appointment, app.clock()):
+        raise RuleError("Цену действующей записи может изменить только мастер.")
+    prompt = (f"Текущая цена: {appointment.price_rub} ₽. Введите согласованную стоимость визита "
+              "в рублях. Клиент получит уведомление.")
+    if appointment.prepay_rub:
+        prompt += f" Сумма предоплаты остаётся {appointment.prepay_rub} ₽."
+    await start_form(callback, state, "appointment_price", [("price", prompt, "number")],
+                     {"id": appointment.id, "revision": appointment.revision})
+
+
+@form("appointment_price")
+async def save_price(message, app, actor, values, context):
+    appointment = await app.set_appointment_price(actor, context["id"], values["price"], context["revision"])
+    await show_appointment(message, app, actor, appointment.id)
 
 
 @router.callback_query(F.data.startswith("duration:"))
