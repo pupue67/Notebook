@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from calendar import monthrange
 from datetime import date, datetime, timedelta
+from secrets import randbelow
 
 from ..models import (
     Appointment,
@@ -36,6 +37,19 @@ class MainMenuData:
 
 
 MAX_BUSINESSES_PER_OWNER = 2
+PUBLIC_CODE_COUNT = 900_000
+
+
+async def assign_public_code(tx, business):
+    used = {item.public_code for item in await tx.list(Business)}
+    offset = randbelow(PUBLIC_CODE_COUNT)
+    for step in range(PUBLIC_CODE_COUNT):
+        code = str(100_000 + (offset + step) % PUBLIC_CODE_COUNT)
+        if code not in used:
+            business.public_code = code
+            await tx.put(business)
+            return
+    raise RuleError("Свободные коды специалистов закончились.")
 
 
 class Catalog:
@@ -102,14 +116,19 @@ class Catalog:
                 address=address[:500],
                 comment=comment[:1000],
             )
-            await transaction.put(business)
+            await assign_public_code(transaction, business)
             return business
 
     async def business(self, id):
         async with self.repo.transaction() as transaction:
             business = await transaction.get(Business, id)
+            if not business and len(id) == 6 and id.isascii() and id.isdigit():
+                matches = await transaction.list(Business, public_code=id)
+                business = matches[0] if matches else None
             if not business:
                 raise RuleError("Специалист не найден. Проверьте ссылку или код.")
+            if business.public_code is None:
+                await assign_public_code(transaction, business)
             return business
 
     async def update_business(self, actor, id, field, value):

@@ -20,11 +20,12 @@ async def show_profile(event, app, actor, business_id, bot, manage=False):
         )
         or "Пока нет услуг."
     )
+    message += f"\n\nКод специалиста: {b.public_code}"
     buttons = []
     if manage and b.owner_id == actor:
         username = (await bot.get_me()).username
         message += f"\n\nСсылка клиентам: https://t.me/{username}?start=b_{b.id}"
-        message += f"\nКод: {b.id}\nНовые записи: {'включены' if b.accepts_new else 'выключены'}"
+        message += f"\nНовые записи: {'включены' if b.accepts_new else 'выключены'}"
         buttons += [
             ("Услуги", f"services:{b.id}"),
             ("Рабочая неделя", f"week:{b.id}"),
@@ -123,7 +124,7 @@ async def specialists(callback, state: FSMContext, app, actor):
 
 @router.callback_query(F.data == "findbusiness")
 async def find(callback, state: FSMContext):
-    await start_form(callback, state, "findbusiness", [("code", "Введите код специалиста:", "text")])
+    await start_form(callback, state, "findbusiness", [("code", "Введите шестизначный код специалиста:", "text")])
 
 
 @form("findbusiness")

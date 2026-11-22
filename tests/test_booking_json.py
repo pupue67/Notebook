@@ -9,7 +9,28 @@ from notebook_bot.config import Settings
 from notebook_bot.bot.notifications import deliver
 from notebook_bot.logic.rules import RuleError
 from notebook_bot.main import build_app, build_dispatcher, process_lock
-from notebook_bot.models import Appointment, History, Interval, Notification
+from notebook_bot.models import Appointment, Business, History, Interval, Notification
+
+
+@pytest.mark.asyncio
+async def test_short_business_code_is_unique_and_persists_for_legacy_profiles(tmp_path, monkeypatch):
+    settings = Settings("test:token", "json", tmp_path / "notebook.json", ZoneInfo("Asia/Yekaterinburg"))
+    app = build_app(settings)
+    owner = await app.user(101, "Мастер")
+    legacy = Business(owner_id=owner.id, name="Старый профиль")
+    async with app.repo.transaction() as tx:
+        await tx.put(legacy)
+
+    monkeypatch.setattr("notebook_bot.logic.catalog.randbelow", lambda limit: 0)
+    new = await app.create_business(owner.id, "Студия", "Мастер", "Услуги", "at_master", "Адрес", "")
+    old = await app.business(legacy.id)
+    assert new.public_code == "100000"
+    assert old.public_code == "100001"
+
+    reopened = build_app(settings)
+    assert (await reopened.business(old.public_code)).id == legacy.id
+    assert (await reopened.business(legacy.id)).public_code == old.public_code
+    assert (await reopened.business(new.public_code)).id == new.id
 
 
 @pytest.mark.asyncio

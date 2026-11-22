@@ -23,6 +23,7 @@ class User(Entity):
 class Business(Entity):
     owner_id: str
     name: str
+    public_code: str | None = None
     specialist: str = ""
     description: str = ""
     location: Literal["at_master", "at_client", "online", "variable"] = "at_master"
