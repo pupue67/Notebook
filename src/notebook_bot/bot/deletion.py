@@ -20,7 +20,7 @@ async def show_deletion(event, app, actor, kind, id, page=0):
     is_business = kind == "b"
     item = await (app.owned_business(actor, id) if is_business else app.owned_service(actor, id))
     records = await app.deletion_appointments(actor, "business" if is_business else "service", id)
-    back = ("Отказаться от удаления", f"settings:{id}" if is_business else f"service:{id}")
+    back = ("Отказаться от удаления", "home" if is_business else f"services:{item.business_id}")
     buttons = []
     if records:
         page = min(page, (len(records) - 1) // 10)
@@ -44,6 +44,31 @@ async def show_deletion(event, app, actor, kind, id, page=0):
             message = f"Удалить услугу «{item.name}»? Новые записи на неё станут недоступны."
         buttons.append(("Да, удалить", f"delok:{kind}:{id}:normal", "danger"))
     await send(event, message, one(*buttons, back))
+
+
+@router.callback_query(F.data == "businessdeletepick")
+async def pick_business(callback, state: FSMContext, app):
+    await state.clear()
+    data = await app.get_main_menu_data(callback.from_user.id)
+    await send(
+        callback,
+        "Выберите бизнес для удаления." if data.businesses else "У вас нет бизнесов.",
+        one(*[(business.name, f"businessdeleteask:{business.id}") for business in data.businesses], HOME),
+    )
+
+
+@router.callback_query(F.data.startswith("servicedeletepick:"))
+async def pick_service(callback, state: FSMContext, app, actor):
+    business_id = callback.data.split(":")[1]
+    await app.owned_business(actor, business_id)
+    await state.clear()
+    services = await app.services(business_id, actor)
+    await send(
+        callback,
+        "Выберите услугу для удаления." if services else "У этого бизнеса нет услуг.",
+        one(*[(service.name, f"servicedeleteask:{service.id}") for service in services],
+            ("Назад к услугам", f"services:{business_id}")),
+    )
 
 
 @router.callback_query(F.data.startswith("businessdeleteask:"))

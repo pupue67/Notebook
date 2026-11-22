@@ -19,6 +19,7 @@ async def services(callback, app, actor):
         one(
             *[(f"{s.name} ({'активна' if s.active else 'скрыта'})", f"service:{s.id}") for s in items],
             ("Добавить услугу", f"serviceadd:{id}"),
+            *([("Удалить услугу", f"servicedeletepick:{id}")] if items else []),
             ("Мой бизнес", f"nav:business:{id}"),
             HOME,
         ),
@@ -34,7 +35,6 @@ async def service(callback, app, actor):
         one(
             ("Редактировать", f"serviceedit:{s.id}"),
             ("Скрыть / активировать", f"servicehide:{s.id}"),
-            ("Удалить услугу", f"servicedeleteask:{s.id}"),
             ("Услуги", f"services:{s.business_id}"),
             HOME,
         ),

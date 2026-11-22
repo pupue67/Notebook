@@ -14,6 +14,8 @@ def build_keyboard(data):
     buttons.extend((f"{business.name}", f"nav:business:{business.id}") for business in data.businesses)
     if data.can_create_business:
         buttons.append(("Создать бизнес", "nav:create"))
+    if data.businesses:
+        buttons.append(("Удалить бизнес", "businessdeletepick"))
     return one(*buttons)
 
 
